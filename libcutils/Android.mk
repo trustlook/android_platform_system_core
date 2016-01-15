@@ -50,7 +50,7 @@ commonSources := \
 	threads.c \
 	sched_policy.c \
 	iosched_policy.c \
-	str_parms.c
+	str_parms.c \
 
 commonHostSources := \
         ashmem-host.c
@@ -75,13 +75,10 @@ ifeq ($(WINDOWS_HOST_ONLY),1)
 else
     commonSources += \
         abort_socket.c \
-        mspace.c \
+        fs.c \
         selector.c \
-        tztime.c \
+        multiuser.c \
         zygote.c
-
-    commonHostSources += \
-        tzstrftime.c
 endif
 
 
@@ -124,21 +121,18 @@ LOCAL_SRC_FILES := $(commonSources) \
         mq.c \
         partition_utils.c \
         qtaguid.c \
+        trace.c \
         uevent.c
 
 ifeq ($(TARGET_ARCH),arm)
 LOCAL_SRC_FILES += arch-arm/memset32.S
 else  # !arm
-ifeq ($(TARGET_ARCH),sh)
-LOCAL_SRC_FILES += memory.c atomic-android-sh.c
-else  # !sh
 ifeq ($(TARGET_ARCH_VARIANT),x86-atom)
 LOCAL_CFLAGS += -DHAVE_MEMSET16 -DHAVE_MEMSET32
 LOCAL_SRC_FILES += arch-x86/android_memset16.S arch-x86/android_memset32.S memory.c
 else # !x86-atom
 LOCAL_SRC_FILES += memory.c
 endif # !x86-atom
-endif # !sh
 endif # !arm
 
 LOCAL_C_INCLUDES := $(libcutils_c_includes) $(KERNEL_HEADERS)
@@ -148,7 +142,9 @@ include $(BUILD_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := libcutils
-LOCAL_WHOLE_STATIC_LIBRARIES := libcutils
+# TODO: remove liblog as whole static library, once we don't have prebuilt that requires
+# liblog symbols present in libcutils.
+LOCAL_WHOLE_STATIC_LIBRARIES := libcutils liblog
 LOCAL_SHARED_LIBRARIES := liblog
 LOCAL_CFLAGS += $(targetSmpFlag)
 LOCAL_C_INCLUDES := $(libcutils_c_includes)
@@ -161,3 +157,5 @@ LOCAL_SRC_FILES := str_parms.c hashmap.c memory.c
 LOCAL_SHARED_LIBRARIES := liblog
 LOCAL_MODULE_TAGS := optional
 include $(BUILD_EXECUTABLE)
+
+include $(call all-makefiles-under,$(LOCAL_PATH))

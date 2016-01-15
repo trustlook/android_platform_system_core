@@ -23,9 +23,7 @@
 #include <errno.h>
 #include <time.h>
 
-#ifdef HAVE_SELINUX
 #include <selinux/label.h>
-#endif
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -47,7 +45,7 @@
  */
 static unsigned int android_name_to_id(const char *name)
 {
-    struct android_id_info *info = android_ids;
+    const struct android_id_info *info = android_ids;
     unsigned int n;
 
     for (n = 0; n < android_id_count; n++) {
@@ -89,9 +87,7 @@ int create_socket(const char *name, int type, mode_t perm, uid_t uid, gid_t gid)
 {
     struct sockaddr_un addr;
     int fd, ret;
-#ifdef HAVE_SELINUX
     char *secon;
-#endif
 
     fd = socket(PF_UNIX, type, 0);
     if (fd < 0) {
@@ -110,14 +106,12 @@ int create_socket(const char *name, int type, mode_t perm, uid_t uid, gid_t gid)
         goto out_close;
     }
 
-#ifdef HAVE_SELINUX
     secon = NULL;
     if (sehandle) {
         ret = selabel_lookup(sehandle, &secon, addr.sun_path, S_IFSOCK);
         if (ret == 0)
             setfscreatecon(secon);
     }
-#endif
 
     ret = bind(fd, (struct sockaddr *) &addr, sizeof (addr));
     if (ret) {
@@ -125,10 +119,8 @@ int create_socket(const char *name, int type, mode_t perm, uid_t uid, gid_t gid)
         goto out_unlink;
     }
 
-#ifdef HAVE_SELINUX
     setfscreatecon(NULL);
     freecon(secon);
-#endif
 
     chown(addr.sun_path, uid, gid);
     chmod(addr.sun_path, perm);
@@ -302,12 +294,12 @@ int mkdir_recursive(const char *pathname, mode_t mode)
         memcpy(buf, pathname, width);
         buf[width] = 0;
         if (stat(buf, &info) != 0) {
-            ret = mkdir(buf, mode);
+            ret = make_dir(buf, mode);
             if (ret && errno != EEXIST)
                 return ret;
         }
     }
-    ret = mkdir(pathname, mode);
+    ret = make_dir(pathname, mode);
     if (ret && errno != EEXIST)
         return ret;
     return 0;
@@ -462,4 +454,48 @@ void import_kernel_cmdline(int in_qemu,
         import_kernel_nv(ptr, in_qemu);
         ptr = x;
     }
+}
+
+int make_dir(const char *path, mode_t mode)
+{
+    int rc;
+
+    char *secontext = NULL;
+
+    if (sehandle) {
+        selabel_lookup(sehandle, &secontext, path, mode);
+        setfscreatecon(secontext);
+    }
+
+    rc = mkdir(path, mode);
+
+    if (secontext) {
+        int save_errno = errno;
+        freecon(secontext);
+        setfscreatecon(NULL);
+        errno = save_errno;
+    }
+
+    return rc;
+}
+
+int restorecon(const char *pathname)
+{
+    char *secontext = NULL;
+    struct stat sb;
+    int i;
+
+    if (is_selinux_enabled() <= 0 || !sehandle)
+        return 0;
+
+    if (lstat(pathname, &sb) < 0)
+        return -errno;
+    if (selabel_lookup(sehandle, &secontext, pathname, sb.st_mode) < 0)
+        return -errno;
+    if (lsetfilecon(pathname, secontext) < 0) {
+        freecon(secontext);
+        return -errno;
+    }
+    freecon(secontext);
+    return 0;
 }

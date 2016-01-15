@@ -27,14 +27,37 @@
 
 #include <unistd.h>
 #include <signal.h>
+#include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 #include <unwind.h>
-#include <sys/exec_elf.h>
 #include <cutils/log.h>
 #include <cutils/atomic.h>
+#include <elf.h>
 
-#if HAVE_DLADDR
+#define __USE_GNU // For dladdr(3) in glibc.
 #include <dlfcn.h>
+
+#if defined(__BIONIC__)
+
+// Bionic implements and exports gettid but only implements tgkill.
+extern int tgkill(int tgid, int tid, int sig);
+
+#else
+
+// glibc doesn't implement or export either gettid or tgkill.
+
+#include <unistd.h>
+#include <sys/syscall.h>
+
+static pid_t gettid() {
+  return syscall(__NR_gettid);
+}
+
+static int tgkill(int tgid, int tid, int sig) {
+  return syscall(__NR_tgkill, tgid, tid, sig);
+}
+
 #endif
 
 typedef struct {
@@ -99,7 +122,7 @@ static volatile struct {
     size_t returned_frames;
 } g_unwind_signal_state;
 
-static void unwind_backtrace_thread_signal_handler(int n, siginfo_t* siginfo, void* sigcontext) {
+static void unwind_backtrace_thread_signal_handler(int n __attribute__((unused)), siginfo_t* siginfo, void* sigcontext) {
     if (!android_atomic_acquire_cas(gettid(), STATE_DUMPING, &g_unwind_signal_state.tid_state)) {
         g_unwind_signal_state.returned_frames = unwind_backtrace_signal_arch(
                 siginfo, sigcontext,
@@ -114,8 +137,6 @@ static void unwind_backtrace_thread_signal_handler(int n, siginfo_t* siginfo, vo
     }
 }
 #endif
-
-extern int tgkill(int tgid, int tid, int sig);
 
 ssize_t unwind_backtrace_thread(pid_t tid, backtrace_frame_t* backtrace,
         size_t ignore_depth, size_t max_depth) {
@@ -233,7 +254,6 @@ void get_backtrace_symbols(const backtrace_frame_t* backtrace, size_t frames,
             if (mi->name[0]) {
                 symbol->map_name = strdup(mi->name);
             }
-#if HAVE_DLADDR
             Dl_info info;
             if (dladdr((const void*)frame->absolute_pc, &info) && info.dli_sname) {
                 symbol->relative_symbol_addr = (uintptr_t)info.dli_saddr
@@ -241,7 +261,6 @@ void get_backtrace_symbols(const backtrace_frame_t* backtrace, size_t frames,
                 symbol->symbol_name = strdup(info.dli_sname);
                 symbol->demangled_name = demangle_symbol_name(symbol->symbol_name);
             }
-#endif
         }
     }
     release_my_map_info_list(milist);
@@ -282,7 +301,7 @@ void free_backtrace_symbols(backtrace_symbol_t* backtrace_symbols, size_t frames
     }
 }
 
-void format_backtrace_line(unsigned frameNumber, const backtrace_frame_t* frame,
+void format_backtrace_line(unsigned frameNumber, const backtrace_frame_t* frame __attribute__((unused)),
         const backtrace_symbol_t* symbol, char* buffer, size_t bufferSize) {
     const char* mapName = symbol->map_name ? symbol->map_name : "<unknown>";
     const char* symbolName = symbol->demangled_name ? symbol->demangled_name : symbol->symbol_name;

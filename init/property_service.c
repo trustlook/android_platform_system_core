@@ -27,6 +27,7 @@
 
 #include <cutils/misc.h>
 #include <cutils/sockets.h>
+#include <cutils/multiuser.h>
 
 #define _REALLY_INCLUDE_SYS__SYSTEM_PROPERTIES_H_
 #include <sys/_system_properties.h>
@@ -39,6 +40,9 @@
 #include <sys/mman.h>
 #include <sys/atomics.h>
 #include <private/android_filesystem_config.h>
+
+#include <selinux/selinux.h>
+#include <selinux/label.h>
 
 #include "property_service.h"
 #include "init.h"
@@ -76,6 +80,7 @@ struct {
     { "sys.",             AID_SYSTEM,   0 },
     { "service.",         AID_SYSTEM,   0 },
     { "wlan.",            AID_SYSTEM,   0 },
+    { "bluetooth.",       AID_BLUETOOTH,   0 },
     { "dhcp.",            AID_SYSTEM,   0 },
     { "dhcp.",            AID_DHCP,     0 },
     { "debug.",           AID_SYSTEM,   0 },
@@ -86,6 +91,8 @@ struct {
     { "persist.sys.",     AID_SYSTEM,   0 },
     { "persist.service.", AID_SYSTEM,   0 },
     { "persist.security.", AID_SYSTEM,   0 },
+    { "persist.service.bdroid.", AID_BLUETOOTH,   0 },
+    { "selinux."         , AID_SYSTEM,   0 },
     { NULL, 0, 0 }
 };
 
@@ -117,7 +124,7 @@ static int init_workspace(workspace *w, size_t size)
         /* dev is a tmpfs that we can use to carve a shared workspace
          * out of, so let's do that...
          */
-    fd = open("/dev/__properties__", O_RDWR | O_CREAT, 0600);
+    fd = open(PROP_FILENAME, O_RDWR | O_CREAT | O_NOFOLLOW, 0644);
     if (fd < 0)
         return -1;
 
@@ -130,11 +137,9 @@ static int init_workspace(workspace *w, size_t size)
 
     close(fd);
 
-    fd = open("/dev/__properties__", O_RDONLY);
+    fd = open(PROP_FILENAME, O_RDONLY | O_NOFOLLOW);
     if (fd < 0)
         return -1;
-
-    unlink("/dev/__properties__");
 
     w->data = data;
     w->size = size;
@@ -191,23 +196,68 @@ static void update_prop_info(prop_info *pi, const char *value, unsigned len)
     __futex_wake(&pi->serial, INT32_MAX);
 }
 
+static int check_mac_perms(const char *name, char *sctx)
+{
+    if (is_selinux_enabled() <= 0)
+        return 1;
+
+    char *tctx = NULL;
+    const char *class = "property_service";
+    const char *perm = "set";
+    int result = 0;
+
+    if (!sctx)
+        goto err;
+
+    if (!sehandle_prop)
+        goto err;
+
+    if (selabel_lookup(sehandle_prop, &tctx, name, 1) != 0)
+        goto err;
+
+    if (selinux_check_access(sctx, tctx, class, perm, name) == 0)
+        result = 1;
+
+    freecon(tctx);
+ err:
+    return result;
+}
+
+static int check_control_mac_perms(const char *name, char *sctx)
+{
+    /*
+     *  Create a name prefix out of ctl.<service name>
+     *  The new prefix allows the use of the existing
+     *  property service backend labeling while avoiding
+     *  mislabels based on true property prefixes.
+     */
+    char ctl_name[PROP_VALUE_MAX+4];
+    int ret = snprintf(ctl_name, sizeof(ctl_name), "ctl.%s", name);
+
+    if (ret < 0 || (size_t) ret >= sizeof(ctl_name))
+        return 0;
+
+    return check_mac_perms(ctl_name, sctx);
+}
+
 /*
  * Checks permissions for starting/stoping system services.
  * AID_SYSTEM and AID_ROOT are always allowed.
  *
  * Returns 1 if uid allowed, 0 otherwise.
  */
-static int check_control_perms(const char *name, unsigned int uid, unsigned int gid) {
+static int check_control_perms(const char *name, unsigned int uid, unsigned int gid, char *sctx) {
+
     int i;
     if (uid == AID_SYSTEM || uid == AID_ROOT)
-        return 1;
+      return check_control_mac_perms(name, sctx);
 
     /* Search the ACL */
     for (i = 0; control_perms[i].service; i++) {
         if (strcmp(control_perms[i].service, name) == 0) {
             if ((uid && control_perms[i].uid == uid) ||
                 (gid && control_perms[i].gid == gid)) {
-                return 1;
+                return check_control_mac_perms(name, sctx);
             }
         }
     }
@@ -218,22 +268,29 @@ static int check_control_perms(const char *name, unsigned int uid, unsigned int 
  * Checks permissions for setting system properties.
  * Returns 1 if uid allowed, 0 otherwise.
  */
-static int check_perms(const char *name, unsigned int uid, unsigned int gid)
+static int check_perms(const char *name, unsigned int uid, unsigned int gid, char *sctx)
 {
     int i;
-    if (uid == 0)
-        return 1;
+    unsigned int app_id;
 
     if(!strncmp(name, "ro.", 3))
         name +=3;
 
+    if (uid == 0)
+        return check_mac_perms(name, sctx);
+
+    app_id = multiuser_get_app_id(uid);
+    if (app_id == AID_BLUETOOTH) {
+        uid = app_id;
+    }
+
     for (i = 0; property_perms[i].prefix; i++) {
-        int tmp;
         if (strncmp(property_perms[i].prefix, name,
                     strlen(property_perms[i].prefix)) == 0) {
             if ((uid && property_perms[i].uid == uid) ||
                 (gid && property_perms[i].gid == gid)) {
-                return 1;
+
+                return check_mac_perms(name, sctx);
             }
         }
     }
@@ -258,13 +315,12 @@ const char* property_get(const char *name)
 
 static void write_persistent_property(const char *name, const char *value)
 {
-    const char *tempPath = PERSISTENT_PROPERTY_DIR "/.temp";
+    char tempPath[PATH_MAX];
     char path[PATH_MAX];
-    int fd, length;
+    int fd;
 
-    snprintf(path, sizeof(path), "%s/%s", PERSISTENT_PROPERTY_DIR, name);
-
-    fd = open(tempPath, O_WRONLY|O_CREAT|O_TRUNC, 0600);
+    snprintf(tempPath, sizeof(tempPath), "%s/.temp.XXXXXX", PERSISTENT_PROPERTY_DIR);
+    fd = mkstemp(tempPath);
     if (fd < 0) {
         ERROR("Unable to write persistent property to temp file %s errno: %d\n", tempPath, errno);
         return;
@@ -272,6 +328,7 @@ static void write_persistent_property(const char *name, const char *value)
     write(fd, value, strlen(value));
     close(fd);
 
+    snprintf(path, sizeof(path), "%s/%s", PERSISTENT_PROPERTY_DIR, name);
     if (rename(tempPath, path)) {
         unlink(tempPath);
         ERROR("Unable to rename persistent property file %s to %s\n", tempPath, path);
@@ -283,8 +340,8 @@ int property_set(const char *name, const char *value)
     prop_area *pa;
     prop_info *pi;
 
-    int namelen = strlen(name);
-    int valuelen = strlen(value);
+    size_t namelen = strlen(name);
+    size_t valuelen = strlen(value);
 
     if(namelen >= PROP_NAME_MAX) return -1;
     if(valuelen >= PROP_VALUE_MAX) return -1;
@@ -334,6 +391,9 @@ int property_set(const char *name, const char *value)
          * to prevent them from being overwritten by default values.
          */
         write_persistent_property(name, value);
+    } else if (strcmp("selinux.reload_policy", name) == 0 &&
+               strcmp("1", value) == 0) {
+        selinux_reload_policy();
     }
     property_changed(name, value);
     return 0;
@@ -349,6 +409,7 @@ void handle_property_set_fd()
     struct sockaddr_un addr;
     socklen_t addr_size = sizeof(addr);
     socklen_t cr_size = sizeof(cr);
+    char * source_ctx = NULL;
 
     if ((s = accept(property_set_fd, (struct sockaddr *) &addr, &addr_size)) < 0) {
         return;
@@ -357,13 +418,13 @@ void handle_property_set_fd()
     /* Check socket options here */
     if (getsockopt(s, SOL_SOCKET, SO_PEERCRED, &cr, &cr_size) < 0) {
         close(s);
-        ERROR("Unable to recieve socket options\n");
+        ERROR("Unable to receive socket options\n");
         return;
     }
 
     r = TEMP_FAILURE_RETRY(recv(s, &msg, sizeof(msg), 0));
     if(r != sizeof(prop_msg)) {
-        ERROR("sys_prop: mis-match msg size recieved: %d expected: %d errno: %d\n",
+        ERROR("sys_prop: mis-match msg size received: %d expected: %d errno: %d\n",
               r, sizeof(prop_msg), errno);
         close(s);
         return;
@@ -374,18 +435,20 @@ void handle_property_set_fd()
         msg.name[PROP_NAME_MAX-1] = 0;
         msg.value[PROP_VALUE_MAX-1] = 0;
 
+        getpeercon(s, &source_ctx);
+
         if(memcmp(msg.name,"ctl.",4) == 0) {
             // Keep the old close-socket-early behavior when handling
             // ctl.* properties.
             close(s);
-            if (check_control_perms(msg.value, cr.uid, cr.gid)) {
+            if (check_control_perms(msg.value, cr.uid, cr.gid, source_ctx)) {
                 handle_control_message((char*) msg.name + 4, (char*) msg.value);
             } else {
                 ERROR("sys_prop: Unable to %s service ctl [%s] uid:%d gid:%d pid:%d\n",
                         msg.name + 4, msg.value, cr.uid, cr.gid, cr.pid);
             }
         } else {
-            if (check_perms(msg.name, cr.uid, cr.gid)) {
+            if (check_perms(msg.name, cr.uid, cr.gid, source_ctx)) {
                 property_set((char*) msg.name, (char*) msg.value);
             } else {
                 ERROR("sys_prop: permission denied uid:%d  name:%s\n",
@@ -397,6 +460,7 @@ void handle_property_set_fd()
             // the property is written to memory.
             close(s);
         }
+        freecon(source_ctx);
         break;
 
     default:
@@ -454,12 +518,14 @@ static void load_properties_from_file(const char *fn)
 static void load_persistent_properties()
 {
     DIR* dir = opendir(PERSISTENT_PROPERTY_DIR);
+    int dir_fd;
     struct dirent*  entry;
-    char path[PATH_MAX];
     char value[PROP_VALUE_MAX];
     int fd, length;
+    struct stat sb;
 
     if (dir) {
+        dir_fd = dirfd(dir);
         while ((entry = readdir(dir)) != NULL) {
             if (strncmp("persist.", entry->d_name, strlen("persist.")))
                 continue;
@@ -468,20 +534,39 @@ static void load_persistent_properties()
                 continue;
 #endif
             /* open the file and read the property value */
-            snprintf(path, sizeof(path), "%s/%s", PERSISTENT_PROPERTY_DIR, entry->d_name);
-            fd = open(path, O_RDONLY);
-            if (fd >= 0) {
-                length = read(fd, value, sizeof(value) - 1);
-                if (length >= 0) {
-                    value[length] = 0;
-                    property_set(entry->d_name, value);
-                } else {
-                    ERROR("Unable to read persistent property file %s errno: %d\n", path, errno);
-                }
-                close(fd);
-            } else {
-                ERROR("Unable to open persistent property file %s errno: %d\n", path, errno);
+            fd = openat(dir_fd, entry->d_name, O_RDONLY | O_NOFOLLOW);
+            if (fd < 0) {
+                ERROR("Unable to open persistent property file \"%s\" errno: %d\n",
+                      entry->d_name, errno);
+                continue;
             }
+            if (fstat(fd, &sb) < 0) {
+                ERROR("fstat on property file \"%s\" failed errno: %d\n", entry->d_name, errno);
+                close(fd);
+                continue;
+            }
+
+            // File must not be accessible to others, be owned by root/root, and
+            // not be a hard link to any other file.
+            if (((sb.st_mode & (S_IRWXG | S_IRWXO)) != 0)
+                    || (sb.st_uid != 0)
+                    || (sb.st_gid != 0)
+                    || (sb.st_nlink != 1)) {
+                ERROR("skipping insecure property file %s (uid=%lu gid=%lu nlink=%d mode=%o)\n",
+                      entry->d_name, sb.st_uid, sb.st_gid, sb.st_nlink, sb.st_mode);
+                close(fd);
+                continue;
+            }
+
+            length = read(fd, value, sizeof(value) - 1);
+            if (length >= 0) {
+                value[length] = 0;
+                property_set(entry->d_name, value);
+            } else {
+                ERROR("Unable to read persistent property file %s errno: %d\n",
+                      entry->d_name, errno);
+            }
+            close(fd);
         }
         closedir(dir);
     } else {
@@ -506,6 +591,16 @@ int properties_inited(void)
     return property_area_inited;
 }
 
+static void load_override_properties() {
+#ifdef ALLOW_LOCAL_PROP_OVERRIDE
+    const char *debuggable = property_get("ro.debuggable");
+    if (debuggable && (strcmp(debuggable, "1") == 0)) {
+        load_properties_from_file(PROP_PATH_LOCAL_OVERRIDE);
+    }
+#endif /* ALLOW_LOCAL_PROP_OVERRIDE */
+}
+
+
 /* When booting an encrypted system, /data is not mounted when the
  * property service is started, so any properties stored there are
  * not loaded.  Vold triggers init to load these properties once it
@@ -513,9 +608,7 @@ int properties_inited(void)
  */
 void load_persist_props(void)
 {
-#ifdef ALLOW_LOCAL_PROP_OVERRIDE
-    load_properties_from_file(PROP_PATH_LOCAL_OVERRIDE);
-#endif /* ALLOW_LOCAL_PROP_OVERRIDE */
+    load_override_properties();
     /* Read persistent properties after all default values have been loaded. */
     load_persistent_properties();
 }
@@ -526,9 +619,7 @@ void start_property_service(void)
 
     load_properties_from_file(PROP_PATH_SYSTEM_BUILD);
     load_properties_from_file(PROP_PATH_SYSTEM_DEFAULT);
-#ifdef ALLOW_LOCAL_PROP_OVERRIDE
-    load_properties_from_file(PROP_PATH_LOCAL_OVERRIDE);
-#endif /* ALLOW_LOCAL_PROP_OVERRIDE */
+    load_override_properties();
     /* Read persistent properties after all default values have been loaded. */
     load_persistent_properties();
 

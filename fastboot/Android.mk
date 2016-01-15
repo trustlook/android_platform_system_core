@@ -20,6 +20,7 @@ LOCAL_C_INCLUDES := $(LOCAL_PATH)/../mkbootimg \
   $(LOCAL_PATH)/../../extras/ext4_utils
 LOCAL_SRC_FILES := protocol.c engine.c bootimg.c fastboot.c
 LOCAL_MODULE := fastboot
+LOCAL_MODULE_TAGS := debug
 
 ifeq ($(HOST_OS),linux)
   LOCAL_SRC_FILES += usb_linux.c util_linux.c
@@ -48,16 +49,23 @@ ifeq ($(HOST_OS),windows)
   LOCAL_C_INCLUDES += development/host/windows/usb/api
 endif
 
-LOCAL_STATIC_LIBRARIES := $(EXTRA_STATIC_LIBS) libzipfile libunz libext4_utils libz
+LOCAL_STATIC_LIBRARIES := \
+    $(EXTRA_STATIC_LIBS) \
+    libzipfile \
+    libunz \
+    libext4_utils_host \
+    libsparse_host \
+    libz
 
 ifneq ($(HOST_OS),windows)
-ifeq ($(HAVE_SELINUX), true)
 LOCAL_STATIC_LIBRARIES += libselinux
-endif # HAVE_SELINUX
 endif # HOST_OS != windows
 
 include $(BUILD_HOST_EXECUTABLE)
-$(call dist-for-goals,dist_files,$(LOCAL_BUILT_MODULE))
+
+
+$(call dist-for-goals,dist_files sdk,$(LOCAL_BUILT_MODULE))
+
 
 ifeq ($(HOST_OS),linux)
 include $(CLEAR_VARS)
