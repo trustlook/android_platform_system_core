@@ -24,11 +24,9 @@ endif
 hostSmpFlag := -DANDROID_SMP=0
 
 commonSources := \
-	array.c \
 	hashmap.c \
 	atomic.c.arm \
 	native_handle.c \
-	buffer.c \
 	socket_inaddr_any_server.c \
 	socket_local_client.c \
 	socket_local_server.c \
@@ -45,12 +43,10 @@ commonSources := \
 	strdup8to16.c \
 	record_stream.c \
 	process_name.c \
-	properties.c \
-	qsort_r_compat.c \
 	threads.c \
 	sched_policy.c \
 	iosched_policy.c \
-	str_parms.c
+	str_parms.c \
 
 commonHostSources := \
         ashmem-host.c
@@ -69,19 +65,10 @@ ifneq ($(strip $(USE_MINGW)),)
     WINDOWS_HOST_ONLY := 1
 endif
 
-ifeq ($(WINDOWS_HOST_ONLY),1)
+ifneq ($(WINDOWS_HOST_ONLY),1)
     commonSources += \
-        uio.c
-else
-    commonSources += \
-        abort_socket.c \
-        mspace.c \
-        selector.c \
-        tztime.c \
-        zygote.c
-
-    commonHostSources += \
-        tzstrftime.c
+        fs.c \
+        multiuser.c
 endif
 
 
@@ -121,24 +108,25 @@ LOCAL_SRC_FILES := $(commonSources) \
         ashmem-dev.c \
         debugger.c \
         klog.c \
-        mq.c \
         partition_utils.c \
+        properties.c \
         qtaguid.c \
+        trace.c \
         uevent.c
 
 ifeq ($(TARGET_ARCH),arm)
 LOCAL_SRC_FILES += arch-arm/memset32.S
 else  # !arm
-ifeq ($(TARGET_ARCH),sh)
-LOCAL_SRC_FILES += memory.c atomic-android-sh.c
-else  # !sh
 ifeq ($(TARGET_ARCH_VARIANT),x86-atom)
 LOCAL_CFLAGS += -DHAVE_MEMSET16 -DHAVE_MEMSET32
 LOCAL_SRC_FILES += arch-x86/android_memset16.S arch-x86/android_memset32.S memory.c
 else # !x86-atom
+ifeq ($(TARGET_ARCH),mips)
+LOCAL_SRC_FILES += arch-mips/android_memset.c
+else # !mips
 LOCAL_SRC_FILES += memory.c
+endif # !mips
 endif # !x86-atom
-endif # !sh
 endif # !arm
 
 LOCAL_C_INCLUDES := $(libcutils_c_includes) $(KERNEL_HEADERS)
@@ -148,7 +136,9 @@ include $(BUILD_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := libcutils
-LOCAL_WHOLE_STATIC_LIBRARIES := libcutils
+# TODO: remove liblog as whole static library, once we don't have prebuilt that requires
+# liblog symbols present in libcutils.
+LOCAL_WHOLE_STATIC_LIBRARIES := libcutils liblog
 LOCAL_SHARED_LIBRARIES := liblog
 LOCAL_CFLAGS += $(targetSmpFlag)
 LOCAL_C_INCLUDES := $(libcutils_c_includes)
@@ -161,3 +151,5 @@ LOCAL_SRC_FILES := str_parms.c hashmap.c memory.c
 LOCAL_SHARED_LIBRARIES := liblog
 LOCAL_MODULE_TAGS := optional
 include $(BUILD_EXECUTABLE)
+
+include $(call all-makefiles-under,$(LOCAL_PATH))

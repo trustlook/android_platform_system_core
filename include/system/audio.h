@@ -31,6 +31,9 @@ __BEGIN_DECLS
  * frameworks/base/include/media/AudioSystem.h
  */
 
+/* device address used to refer to the standard remote submix */
+#define AUDIO_REMOTE_SUBMIX_DEVICE_ADDRESS "0"
+
 typedef int audio_io_handle_t;
 
 /* Audio stream types */
@@ -63,9 +66,17 @@ typedef enum {
     AUDIO_SOURCE_CAMCORDER           = 5,
     AUDIO_SOURCE_VOICE_RECOGNITION   = 6,
     AUDIO_SOURCE_VOICE_COMMUNICATION = 7,
-
+    AUDIO_SOURCE_REMOTE_SUBMIX       = 8, /* Source for the mix to be presented remotely.      */
+                                          /* An example of remote presentation is Wifi Display */
+                                          /*  where a dongle attached to a TV can be used to   */
+                                          /*  play the mix captured by this audio source.      */
     AUDIO_SOURCE_CNT,
     AUDIO_SOURCE_MAX                 = AUDIO_SOURCE_CNT - 1,
+    AUDIO_SOURCE_HOTWORD             = 1999, /* A low-priority, preemptible audio source for
+                                                for background software hotword detection.
+                                                Same tuning as AUDIO_SOURCE_VOICE_RECOGNITION.
+                                                Used only internally to the framework. Not exposed
+                                                at the audio HAL. */
 } audio_source_t;
 
 /* special audio session values
@@ -152,7 +163,7 @@ typedef enum {
                                         AUDIO_FORMAT_PCM_SUB_8_24_BIT),
 } audio_format_t;
 
-typedef enum {
+enum {
     /* output channels */
     AUDIO_CHANNEL_OUT_FRONT_LEFT            = 0x1,
     AUDIO_CHANNEL_OUT_FRONT_RIGHT           = 0x2,
@@ -236,6 +247,7 @@ typedef enum {
 
     AUDIO_CHANNEL_IN_MONO   = AUDIO_CHANNEL_IN_FRONT,
     AUDIO_CHANNEL_IN_STEREO = (AUDIO_CHANNEL_IN_LEFT | AUDIO_CHANNEL_IN_RIGHT),
+    AUDIO_CHANNEL_IN_FRONT_BACK = (AUDIO_CHANNEL_IN_FRONT | AUDIO_CHANNEL_IN_BACK),
     AUDIO_CHANNEL_IN_ALL    = (AUDIO_CHANNEL_IN_LEFT |
                                AUDIO_CHANNEL_IN_RIGHT |
                                AUDIO_CHANNEL_IN_FRONT |
@@ -275,7 +287,11 @@ typedef enum {
     AUDIO_IN_ACOUSTICS_TX_DISABLE    = 0,
 } audio_in_acoustics_t;
 
-typedef enum {
+enum {
+    AUDIO_DEVICE_NONE                          = 0x0,
+    /* reserved bits */
+    AUDIO_DEVICE_BIT_IN                        = 0x80000000,
+    AUDIO_DEVICE_BIT_DEFAULT                   = 0x40000000,
     /* output devices */
     AUDIO_DEVICE_OUT_EARPIECE                  = 0x1,
     AUDIO_DEVICE_OUT_SPEAKER                   = 0x2,
@@ -292,7 +308,8 @@ typedef enum {
     AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET         = 0x1000,
     AUDIO_DEVICE_OUT_USB_ACCESSORY             = 0x2000,
     AUDIO_DEVICE_OUT_USB_DEVICE                = 0x4000,
-    AUDIO_DEVICE_OUT_DEFAULT                   = 0x8000,
+    AUDIO_DEVICE_OUT_REMOTE_SUBMIX             = 0x8000,
+    AUDIO_DEVICE_OUT_DEFAULT                   = AUDIO_DEVICE_BIT_DEFAULT,
     AUDIO_DEVICE_OUT_ALL      = (AUDIO_DEVICE_OUT_EARPIECE |
                                  AUDIO_DEVICE_OUT_SPEAKER |
                                  AUDIO_DEVICE_OUT_WIRED_HEADSET |
@@ -308,6 +325,7 @@ typedef enum {
                                  AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET |
                                  AUDIO_DEVICE_OUT_USB_ACCESSORY |
                                  AUDIO_DEVICE_OUT_USB_DEVICE |
+                                 AUDIO_DEVICE_OUT_REMOTE_SUBMIX |
                                  AUDIO_DEVICE_OUT_DEFAULT),
     AUDIO_DEVICE_OUT_ALL_A2DP = (AUDIO_DEVICE_OUT_BLUETOOTH_A2DP |
                                  AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES |
@@ -319,15 +337,20 @@ typedef enum {
                                  AUDIO_DEVICE_OUT_USB_DEVICE),
 
     /* input devices */
-    AUDIO_DEVICE_IN_COMMUNICATION         = 0x10000,
-    AUDIO_DEVICE_IN_AMBIENT               = 0x20000,
-    AUDIO_DEVICE_IN_BUILTIN_MIC           = 0x40000,
-    AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET = 0x80000,
-    AUDIO_DEVICE_IN_WIRED_HEADSET         = 0x100000,
-    AUDIO_DEVICE_IN_AUX_DIGITAL           = 0x200000,
-    AUDIO_DEVICE_IN_VOICE_CALL            = 0x400000,
-    AUDIO_DEVICE_IN_BACK_MIC              = 0x800000,
-    AUDIO_DEVICE_IN_DEFAULT               = 0x80000000,
+    AUDIO_DEVICE_IN_COMMUNICATION         = AUDIO_DEVICE_BIT_IN | 0x1,
+    AUDIO_DEVICE_IN_AMBIENT               = AUDIO_DEVICE_BIT_IN | 0x2,
+    AUDIO_DEVICE_IN_BUILTIN_MIC           = AUDIO_DEVICE_BIT_IN | 0x4,
+    AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET = AUDIO_DEVICE_BIT_IN | 0x8,
+    AUDIO_DEVICE_IN_WIRED_HEADSET         = AUDIO_DEVICE_BIT_IN | 0x10,
+    AUDIO_DEVICE_IN_AUX_DIGITAL           = AUDIO_DEVICE_BIT_IN | 0x20,
+    AUDIO_DEVICE_IN_VOICE_CALL            = AUDIO_DEVICE_BIT_IN | 0x40,
+    AUDIO_DEVICE_IN_BACK_MIC              = AUDIO_DEVICE_BIT_IN | 0x80,
+    AUDIO_DEVICE_IN_REMOTE_SUBMIX         = AUDIO_DEVICE_BIT_IN | 0x100,
+    AUDIO_DEVICE_IN_ANLG_DOCK_HEADSET     = AUDIO_DEVICE_BIT_IN | 0x200,
+    AUDIO_DEVICE_IN_DGTL_DOCK_HEADSET     = AUDIO_DEVICE_BIT_IN | 0x400,
+    AUDIO_DEVICE_IN_USB_ACCESSORY         = AUDIO_DEVICE_BIT_IN | 0x800,
+    AUDIO_DEVICE_IN_USB_DEVICE            = AUDIO_DEVICE_BIT_IN | 0x1000,
+    AUDIO_DEVICE_IN_DEFAULT               = AUDIO_DEVICE_BIT_IN | AUDIO_DEVICE_BIT_DEFAULT,
 
     AUDIO_DEVICE_IN_ALL     = (AUDIO_DEVICE_IN_COMMUNICATION |
                                AUDIO_DEVICE_IN_AMBIENT |
@@ -337,9 +360,16 @@ typedef enum {
                                AUDIO_DEVICE_IN_AUX_DIGITAL |
                                AUDIO_DEVICE_IN_VOICE_CALL |
                                AUDIO_DEVICE_IN_BACK_MIC |
+                               AUDIO_DEVICE_IN_REMOTE_SUBMIX |
+                               AUDIO_DEVICE_IN_ANLG_DOCK_HEADSET |
+                               AUDIO_DEVICE_IN_DGTL_DOCK_HEADSET |
+                               AUDIO_DEVICE_IN_USB_ACCESSORY |
+                               AUDIO_DEVICE_IN_USB_DEVICE |
                                AUDIO_DEVICE_IN_DEFAULT),
     AUDIO_DEVICE_IN_ALL_SCO = AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET,
-} audio_devices_t;
+};
+
+typedef uint32_t audio_devices_t;
 
 /* the audio output flags serve two purposes:
  * - when an AudioTrack is created they indicate a "wish" to be connected to an
@@ -361,12 +391,55 @@ typedef enum {
                                         // controls related to voice calls.
     AUDIO_OUTPUT_FLAG_FAST = 0x4,       // output supports "fast tracks",
                                         // defined elsewhere
-    AUDIO_OUTPUT_FLAG_DEEP_BUFFER = 0x8 // use deep audio buffers
+    AUDIO_OUTPUT_FLAG_DEEP_BUFFER = 0x8, // use deep audio buffers
+    AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD = 0x10,  // offload playback of compressed
+                                                // streams to hardware codec
+    AUDIO_OUTPUT_FLAG_NON_BLOCKING = 0x20 // use non-blocking write
 } audio_output_flags_t;
+
+/* The audio input flags are analogous to audio output flags.
+ * Currently they are used only when an AudioRecord is created,
+ * to indicate a preference to be connected to an input stream with
+ * attributes corresponding to the specified flags.
+ */
+typedef enum {
+    AUDIO_INPUT_FLAG_NONE = 0x0,        // no attributes
+    AUDIO_INPUT_FLAG_FAST = 0x1,        // prefer an input that supports "fast tracks"
+} audio_input_flags_t;
+
+/* Additional information about compressed streams offloaded to
+ * hardware playback
+ * The version and size fields must be initialized by the caller by using
+ * one of the constants defined here.
+ */
+typedef struct {
+    uint16_t version;                   // version of the info structure
+    uint16_t size;                      // total size of the structure including version and size
+    uint32_t sample_rate;               // sample rate in Hz
+    audio_channel_mask_t channel_mask;  // channel mask
+    audio_format_t format;              // audio format
+    audio_stream_type_t stream_type;    // stream type
+    uint32_t bit_rate;                  // bit rate in bits per second
+    int64_t duration_us;                // duration in microseconds, -1 if unknown
+    bool has_video;                     // true if stream is tied to a video stream
+    bool is_streaming;                  // true if streaming, false if local playback
+} audio_offload_info_t;
+
+#define AUDIO_MAKE_OFFLOAD_INFO_VERSION(maj,min) \
+            ((((maj) & 0xff) << 8) | ((min) & 0xff))
+
+#define AUDIO_OFFLOAD_INFO_VERSION_0_1 AUDIO_MAKE_OFFLOAD_INFO_VERSION(0, 1)
+#define AUDIO_OFFLOAD_INFO_VERSION_CURRENT AUDIO_OFFLOAD_INFO_VERSION_0_1
+
+static const audio_offload_info_t AUDIO_INFO_INITIALIZER = {
+    version: AUDIO_OFFLOAD_INFO_VERSION_CURRENT,
+    size: sizeof(audio_offload_info_t),
+};
 
 static inline bool audio_is_output_device(audio_devices_t device)
 {
-    if ((popcount(device) == 1) && ((device & ~AUDIO_DEVICE_OUT_ALL) == 0))
+    if (((device & AUDIO_DEVICE_BIT_IN) == 0) &&
+            (popcount(device) == 1) && ((device & ~AUDIO_DEVICE_OUT_ALL) == 0))
         return true;
     else
         return false;
@@ -374,11 +447,19 @@ static inline bool audio_is_output_device(audio_devices_t device)
 
 static inline bool audio_is_input_device(audio_devices_t device)
 {
-    if ((popcount(device) == 1) && ((device & ~AUDIO_DEVICE_IN_ALL) == 0))
-        return true;
-    else
-        return false;
+    if ((device & AUDIO_DEVICE_BIT_IN) != 0) {
+        device &= ~AUDIO_DEVICE_BIT_IN;
+        if ((popcount(device) == 1) && ((device & ~AUDIO_DEVICE_IN_ALL) == 0))
+            return true;
+    }
+    return false;
 }
+
+static inline bool audio_is_output_devices(audio_devices_t device)
+{
+    return (device & AUDIO_DEVICE_BIT_IN) == 0;
+}
+
 
 static inline bool audio_is_a2dp_device(audio_devices_t device)
 {
@@ -390,6 +471,7 @@ static inline bool audio_is_a2dp_device(audio_devices_t device)
 
 static inline bool audio_is_bluetooth_sco_device(audio_devices_t device)
 {
+    device &= ~AUDIO_DEVICE_BIT_IN;
     if ((popcount(device) == 1) && (device & (AUDIO_DEVICE_OUT_ALL_SCO |
                    AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET)))
         return true;
@@ -405,18 +487,27 @@ static inline bool audio_is_usb_device(audio_devices_t device)
         return false;
 }
 
-static inline bool audio_is_input_channel(uint32_t channel)
+static inline bool audio_is_remote_submix_device(audio_devices_t device)
 {
-    if ((channel & ~AUDIO_CHANNEL_IN_ALL) == 0)
+    if ((device & AUDIO_DEVICE_OUT_REMOTE_SUBMIX) == AUDIO_DEVICE_OUT_REMOTE_SUBMIX
+            || (device & AUDIO_DEVICE_IN_REMOTE_SUBMIX) == AUDIO_DEVICE_IN_REMOTE_SUBMIX)
         return true;
     else
         return false;
 }
 
-static inline bool audio_is_output_channel(uint32_t channel)
+static inline bool audio_is_input_channel(audio_channel_mask_t channel)
+{
+    if ((channel & ~AUDIO_CHANNEL_IN_ALL) == 0)
+        return channel != 0;
+    else
+        return false;
+}
+
+static inline bool audio_is_output_channel(audio_channel_mask_t channel)
 {
     if ((channel & ~AUDIO_CHANNEL_OUT_ALL) == 0)
-        return true;
+        return channel != 0;
     else
         return false;
 }

@@ -130,6 +130,8 @@ int lookup_keyword(const char *s)
         if (!strcmp(s, "neshot")) return K_oneshot;
         if (!strcmp(s, "nrestart")) return K_onrestart;
         break;
+    case 'p':
+        if (!strcmp(s, "owerctl")) return K_powerctl;
     case 'r':
         if (!strcmp(s, "estart")) return K_restart;
         if (!strcmp(s, "estorecon")) return K_restorecon;
@@ -149,6 +151,7 @@ int lookup_keyword(const char *s)
         if (!strcmp(s, "ocket")) return K_socket;
         if (!strcmp(s, "tart")) return K_start;
         if (!strcmp(s, "top")) return K_stop;
+        if (!strcmp(s, "wapon_all")) return K_swapon_all;
         if (!strcmp(s, "ymlink")) return K_symlink;
         if (!strcmp(s, "ysclktz")) return K_sysclktz;
         break;
@@ -206,8 +209,9 @@ int expand_props(char *dst, const char *src, int dst_size)
     while (*src_ptr && left > 0) {
         char *c;
         char prop[PROP_NAME_MAX + 1];
-        const char *prop_val;
+        char prop_val[PROP_VALUE_MAX];
         int prop_len = 0;
+        int prop_val_len;
 
         c = strchr(src_ptr, '$');
         if (!c) {
@@ -265,14 +269,14 @@ int expand_props(char *dst, const char *src, int dst_size)
             goto err;
         }
 
-        prop_val = property_get(prop);
-        if (!prop_val) {
+        prop_val_len = property_get(prop, prop_val);
+        if (!prop_val_len) {
             ERROR("property '%s' doesn't exist while expanding '%s'\n",
                   prop, src);
             goto err;
         }
 
-        ret = push_chars(&dst_ptr, &left, prop_val, strlen(prop_val));
+        ret = push_chars(&dst_ptr, &left, prop_val, prop_val_len);
         if (ret < 0)
             goto err_nospace;
         src_ptr = c;
@@ -543,7 +547,7 @@ void queue_all_property_triggers()
             const char* equals = strchr(name, '=');
             if (equals) {
                 char prop_name[PROP_NAME_MAX + 1];
-                const char* value;
+                char value[PROP_VALUE_MAX];
                 int length = equals - name;
                 if (length > PROP_NAME_MAX) {
                     ERROR("property name too long in trigger %s", act->name);
@@ -552,9 +556,8 @@ void queue_all_property_triggers()
                     prop_name[length] = 0;
 
                     /* does the property exist, and match the trigger value? */
-                    value = property_get(prop_name);
-                    if (value && (!strcmp(equals + 1, value) ||
-                                  !strcmp(equals + 1, "*"))) {
+                    property_get(prop_name, value);
+                    if (!strcmp(equals + 1, value) ||!strcmp(equals + 1, "*")) {
                         action_add_queue_tail(act);
                     }
                 }
@@ -571,6 +574,7 @@ void queue_builtin_action(int (*func)(int nargs, char **args), char *name)
     act = calloc(1, sizeof(*act));
     act->name = name;
     list_init(&act->commands);
+    list_init(&act->qlist);
 
     cmd = calloc(1, sizeof(*cmd));
     cmd->func = func;
@@ -583,7 +587,9 @@ void queue_builtin_action(int (*func)(int nargs, char **args), char *name)
 
 void action_add_queue_tail(struct action *act)
 {
-    list_add_tail(&action_queue, &act->qlist);
+    if (list_empty(&act->qlist)) {
+        list_add_tail(&action_queue, &act->qlist);
+    }
 }
 
 struct action *action_remove_queue_head(void)
@@ -594,6 +600,7 @@ struct action *action_remove_queue_head(void)
         struct listnode *node = list_head(&action_queue);
         struct action *act = node_to_item(node, struct action, qlist);
         list_remove(node);
+        list_init(node);
         return act;
     }
 }
@@ -799,13 +806,11 @@ static void parse_line_service(struct parse_state *state, int nargs, char **args
         }
         break;
     case K_seclabel:
-#ifdef HAVE_SELINUX
         if (nargs != 2) {
             parse_error(state, "seclabel option requires a label string\n");
         } else {
             svc->seclabel = args[1];
         }
-#endif
         break;
 
     default:
@@ -827,6 +832,7 @@ static void *parse_action(struct parse_state *state, int nargs, char **args)
     act = calloc(1, sizeof(*act));
     act->name = args[1];
     list_init(&act->commands);
+    list_init(&act->qlist);
     list_add_tail(&action_list, &act->alist);
         /* XXX add to hash */
     return act;

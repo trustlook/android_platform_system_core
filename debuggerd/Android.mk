@@ -1,6 +1,6 @@
 # Copyright 2005 The Android Open Source Project
 
-ifneq ($(filter arm x86,$(TARGET_ARCH)),)
+ifneq ($(filter arm mips x86,$(TARGET_ARCH)),)
 
 LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
@@ -23,7 +23,12 @@ ifeq ($(ARCH_ARM_HAVE_VFP_D32),true)
 LOCAL_CFLAGS += -DWITH_VFP_D32
 endif # ARCH_ARM_HAVE_VFP_D32
 
-LOCAL_SHARED_LIBRARIES := libcutils libc libcorkscrew
+LOCAL_SHARED_LIBRARIES := \
+	libcutils \
+	liblog \
+	libc \
+	libcorkscrew \
+	libselinux
 
 include $(BUILD_EXECUTABLE)
 
@@ -33,8 +38,9 @@ LOCAL_SRC_FILES += $(TARGET_ARCH)/crashglue.S
 LOCAL_MODULE := crasher
 LOCAL_MODULE_PATH := $(TARGET_OUT_OPTIONAL_EXECUTABLES)
 LOCAL_MODULE_TAGS := optional
+LOCAL_CFLAGS += -fstack-protector-all
 #LOCAL_FORCE_STATIC_EXECUTABLE := true
-LOCAL_SHARED_LIBRARIES := libcutils libc
+LOCAL_SHARED_LIBRARIES := libcutils liblog libc
 include $(BUILD_EXECUTABLE)
 
 ifeq ($(ARCH_ARM_HAVE_VFP),true)
@@ -49,7 +55,7 @@ LOCAL_SRC_FILES := vfp-crasher.c vfp.S
 LOCAL_MODULE := vfp-crasher
 LOCAL_MODULE_PATH := $(TARGET_OUT_OPTIONAL_EXECUTABLES)
 LOCAL_MODULE_TAGS := optional
-LOCAL_SHARED_LIBRARIES := libcutils libc
+LOCAL_SHARED_LIBRARIES := libcutils liblog libc
 include $(BUILD_EXECUTABLE)
 endif # ARCH_ARM_HAVE_VFP == true
 

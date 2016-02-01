@@ -19,12 +19,11 @@ package com.android.dumpkey;
 import java.io.FileInputStream;
 import java.math.BigInteger;
 import java.security.cert.CertificateFactory;
-import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.security.KeyStore;
 import java.security.Key;
 import java.security.PublicKey;
 import java.security.interfaces.RSAPublicKey;
-import sun.misc.BASE64Encoder;
 
 /**
  * Command line tool to extract RSA public keys from X.509 certificates
@@ -34,33 +33,56 @@ import sun.misc.BASE64Encoder;
 class DumpPublicKey {
     /**
      * @param key to perform sanity checks on
+     * @return version number of key.  Supported versions are:
+     *     1: 2048-bit RSA key with e=3 and SHA-1 hash
+     *     2: 2048-bit RSA key with e=65537 and SHA-1 hash
+     *     3: 2048-bit RSA key with e=3 and SHA-256 hash
+     *     4: 2048-bit RSA key with e=65537 and SHA-256 hash
      * @throws Exception if the key has the wrong size or public exponent
+
      */
-    static void check(RSAPublicKey key) throws Exception {
+    static int check(RSAPublicKey key, boolean useSHA256) throws Exception {
         BigInteger pubexp = key.getPublicExponent();
         BigInteger modulus = key.getModulus();
+        int version;
 
-        if (!pubexp.equals(BigInteger.valueOf(3)))
-                throw new Exception("Public exponent should be 3 but is " +
-                        pubexp.toString(10) + ".");
+        if (pubexp.equals(BigInteger.valueOf(3))) {
+            version = useSHA256 ? 3 : 1;
+        } else if (pubexp.equals(BigInteger.valueOf(65537))) {
+            version = useSHA256 ? 4 : 2;
+        } else {
+            throw new Exception("Public exponent should be 3 or 65537 but is " +
+                                pubexp.toString(10) + ".");
+        }
 
-        if (modulus.bitLength() != 2048)
+        if (modulus.bitLength() != 2048) {
              throw new Exception("Modulus should be 2048 bits long but is " +
                         modulus.bitLength() + " bits.");
+        }
+
+        return version;
     }
 
     /**
      * @param key to output
-     * @return a C initializer representing this public key.
+     * @return a String representing this public key.  If the key is a
+     *    version 1 key, the string will be a C initializer; this is
+     *    not true for newer key versions.
      */
-    static String print(RSAPublicKey key) throws Exception {
-        check(key);
+    static String print(RSAPublicKey key, boolean useSHA256) throws Exception {
+        int version = check(key, useSHA256);
 
         BigInteger N = key.getModulus();
 
         StringBuilder result = new StringBuilder();
 
         int nwords = N.bitLength() / 32;    // # of 32 bit integers in modulus
+
+        if (version > 1) {
+            result.append("v");
+            result.append(Integer.toString(version));
+            result.append(" ");
+        }
 
         result.append("{");
         result.append(nwords);
@@ -115,10 +137,27 @@ class DumpPublicKey {
             for (int i = 0; i < args.length; i++) {
                 FileInputStream input = new FileInputStream(args[i]);
                 CertificateFactory cf = CertificateFactory.getInstance("X.509");
-                Certificate cert = cf.generateCertificate(input);
+                X509Certificate cert = (X509Certificate) cf.generateCertificate(input);
+
+                boolean useSHA256 = false;
+                String sigAlg = cert.getSigAlgName();
+                if ("SHA1withRSA".equals(sigAlg) || "MD5withRSA".equals(sigAlg)) {
+                    // SignApk has historically accepted "MD5withRSA"
+                    // certificates, but treated them as "SHA1withRSA"
+                    // anyway.  Continue to do so for backwards
+                    // compatibility.
+                  useSHA256 = false;
+                } else if ("SHA256withRSA".equals(sigAlg)) {
+                  useSHA256 = true;
+                } else {
+                  System.err.println(args[i] + ": unsupported signature algorithm \"" +
+                                     sigAlg + "\"");
+                  System.exit(1);
+                }
+
                 RSAPublicKey key = (RSAPublicKey) (cert.getPublicKey());
-                check(key);
-                System.out.print(print(key));
+                check(key, useSHA256);
+                System.out.print(print(key, useSHA256));
                 System.out.println(i < args.length - 1 ? "," : "");
             }
         } catch (Exception e) {

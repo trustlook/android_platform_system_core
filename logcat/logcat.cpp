@@ -1,10 +1,10 @@
 // Copyright 2006 The Android Open Source Project
 
-#include <cutils/logger.h>
-#include <cutils/logd.h>
+#include <log/logger.h>
+#include <log/logd.h>
+#include <log/logprint.h>
+#include <log/event_tag_map.h>
 #include <cutils/sockets.h>
-#include <cutils/logprint.h>
-#include <cutils/event_tag_map.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,7 +101,7 @@ static EventTagMap* g_eventTagMap = NULL;
 
 static int openLogFile (const char *pathname)
 {
-    return open(g_outputFileName, O_WRONLY | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR);
+    return open(pathname, O_WRONLY | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR);
 }
 
 static void rotateLogs()
