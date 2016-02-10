@@ -93,6 +93,7 @@ struct {
     { "persist.security.", AID_SYSTEM,   0 },
     { "persist.service.bdroid.", AID_BLUETOOTH,   0 },
     { "selinux."         , AID_SYSTEM,   0 },
+    { "taint.",            AID_SYSTEM,   0 },
     { NULL, 0, 0 }
 };
 
@@ -335,6 +336,12 @@ static void write_persistent_property(const char *name, const char *value)
     }
 }
 
+bool is_persist_property_name(char* name) { 
+    if (strncmp("persist.", name, strlen("persist.")) == 0) return true;
+    if (strncmp("taint.", name, strlen("taint.")) == 0) return true;
+    return false;
+}
+
 int property_set(const char *name, const char *value)
 {
     prop_area *pa;
@@ -385,7 +392,7 @@ int property_set(const char *name, const char *value)
         */
         property_set("net.change", name);
     } else if (persistent_properties_loaded &&
-            strncmp("persist.", name, strlen("persist.")) == 0) {
+            is_persist_property_name(name)) {
         /*
          * Don't write properties to disk until after we have read all default properties
          * to prevent them from being overwritten by default values.
@@ -527,7 +534,7 @@ static void load_persistent_properties()
     if (dir) {
         dir_fd = dirfd(dir);
         while ((entry = readdir(dir)) != NULL) {
-            if (strncmp("persist.", entry->d_name, strlen("persist.")))
+            if (is_persist_property_name(entry->d_name) == false)
                 continue;
 #if HAVE_DIRENT_D_TYPE
             if (entry->d_type != DT_REG)
