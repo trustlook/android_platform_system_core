@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include <sync/sync.h>
+#include "sw_sync.h"
 
 pthread_mutex_t printf_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -72,7 +73,7 @@ void *sync_thread(void *data)
     return NULL;
 }
 
-int main(int argc, char *argv[])
+int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 {
     struct sync_thread_data sync_data[4];
     pthread_t threads[4];

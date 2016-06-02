@@ -22,12 +22,13 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <sys/types.h>
-#include <cutils/mspace.h>
 
-#include "tinyutils/KeyedVector.h"
+#include "utils/KeyedVector.h"
 #include "tinyutils/smartpointer.h"
 
 namespace android {
+
+using namespace tinyutils;
 
 // ----------------------------------------------------------------------------
 
@@ -68,9 +69,6 @@ public:
     typedef void    weakref_type;
 
 private:
-    static  mspace  getMspace();
-            void    ensureMbaseExecutable();
-
     mutable int32_t     mCount;
             uint32_t*   mBase;
             size_t      mSize;
