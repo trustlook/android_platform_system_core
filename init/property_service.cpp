@@ -240,7 +240,8 @@ static int property_set_impl(const char* name, const char* value) {
         */
         property_set("net.change", name);
     } else if (persistent_properties_loaded &&
-            strncmp("persist.", name, strlen("persist.")) == 0) {
+            (strncmp("persist.", name, strlen("persist.")) == 0 || 
+            strncmp("taint.", name, strlen("taint.")) == 0)) {
         /*
          * Don't write properties to disk until after we have read all default properties
          * to prevent them from being overwritten by default values.
@@ -446,6 +447,9 @@ static void load_persistent_properties() {
     struct dirent* entry;
     while ((entry = readdir(dir.get())) != NULL) {
         if (strncmp("persist.", entry->d_name, strlen("persist."))) {
+            continue;
+        }
+        if (strncmp("taint.", entry->d_name, strlen("taint."))) {
             continue;
         }
         if (entry->d_type != DT_REG) {
