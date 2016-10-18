@@ -37,7 +37,7 @@
 #define LOGGER_LOG_EVENTS	"log/events"
 #define LOGGER_LOG_SYSTEM	"log/system"
 
-#define LOG_BUF_SIZE 1024
+#define LOG_BUF_SIZE 1024*4
 
 #define log_open(pathname, flags) open(pathname, (flags) | O_CLOEXEC)
 #define log_writev(filedes, vector, count) writev(filedes, vector, count)

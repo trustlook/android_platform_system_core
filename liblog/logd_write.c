@@ -45,7 +45,7 @@
 #include <private/android_filesystem_config.h>
 #include <private/android_logger.h>
 
-#define LOG_BUF_SIZE 1024
+#define LOG_BUF_SIZE 1024*4
 
 #if FAKE_LOG_DEVICE
 /* This will be defined when building for the host. */
