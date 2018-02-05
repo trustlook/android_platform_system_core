@@ -16,16 +16,17 @@
 
 #define LOG_TAG "Vector"
 
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
+#include <utils/VectorImpl.h>
 
-#include <cutils/log.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <log/log.h>
+
 #include <safe_iop.h>
 
-#include <utils/Errors.h>
-#include <utils/SharedBuffer.h>
-#include <utils/VectorImpl.h>
+#include "SharedBuffer.h"
 
 /*****************************************************************************/
 
@@ -204,7 +205,10 @@ status_t VectorImpl::sort(VectorImpl::compar_r_t cmp, void* state)
                     _do_copy(next, curr, 1);
                     next = curr;
                     --j;
-                    curr = reinterpret_cast<char*>(array) + mItemSize*(j);                    
+                    curr = NULL;
+                    if (j >= 0) {
+                        curr = reinterpret_cast<char*>(array) + mItemSize*(j);
+                    }
                 } while (j>=0 && (cmp(curr, temp, state) > 0));
 
                 _do_destroy(next, 1);
@@ -587,6 +591,10 @@ size_t SortedVectorImpl::orderOf(const void* item) const
 
 ssize_t SortedVectorImpl::_indexOrderOf(const void* item, size_t* order) const
 {
+    if (order) *order = 0;
+    if (isEmpty()) {
+        return NAME_NOT_FOUND;
+    }
     // binary search
     ssize_t err = NAME_NOT_FOUND;
     ssize_t l = 0;

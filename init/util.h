@@ -20,47 +20,49 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include <string>
+#include <chrono>
 #include <functional>
+#include <ostream>
+#include <string>
 
-#define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
+#include <android-base/chrono_utils.h>
+#include <selinux/label.h>
 
 #define COLDBOOT_DONE "/dev/.coldboot_done"
 
-int mtd_name_to_number(const char *name);
-int create_socket(const char *name, int type, mode_t perm,
-                  uid_t uid, gid_t gid, const char *socketcon);
+using android::base::boot_clock;
+using namespace std::chrono_literals;
 
-bool read_file(const char* path, std::string* content);
-int write_file(const char* path, const char* content);
+namespace android {
+namespace init {
 
-time_t gettime();
-uint64_t gettime_ns();
+int CreateSocket(const char* name, int type, bool passcred, mode_t perm, uid_t uid, gid_t gid,
+                 const char* socketcon, selabel_handle* sehandle);
 
-class Timer {
- public:
-  Timer() : t0(gettime_ns()) {
-  }
+bool ReadFile(const std::string& path, std::string* content, std::string* err);
+bool WriteFile(const std::string& path, const std::string& content, std::string* err);
 
-  double duration() {
-    return static_cast<double>(gettime_ns() - t0) / 1000000000.0;
-  }
+bool DecodeUid(const std::string& name, uid_t* uid, std::string* err);
 
- private:
-  uint64_t t0;
-};
-
-unsigned int decode_uid(const char *s);
-
-int mkdir_recursive(const char *pathname, mode_t mode);
-void sanitize(char *p);
-void make_link_init(const char *oldpath, const char *newpath);
-void remove_link(const char *oldpath, const char *newpath);
-int wait_for_file(const char *filename, int timeout);
-void open_devnull_stdio(void);
-void import_kernel_cmdline(bool in_qemu, std::function<void(char*,bool)>);
-int make_dir(const char *path, mode_t mode);
-int restorecon(const char *pathname);
-int restorecon_recursive(const char *pathname);
+int mkdir_recursive(const std::string& pathname, mode_t mode, selabel_handle* sehandle);
+int wait_for_file(const char *filename, std::chrono::nanoseconds timeout);
+void import_kernel_cmdline(bool in_qemu,
+                           const std::function<void(const std::string&, const std::string&, bool)>&);
+int make_dir(const char* path, mode_t mode, selabel_handle* sehandle);
 std::string bytes_to_hex(const uint8_t *bytes, size_t bytes_len);
+bool is_dir(const char* pathname);
+bool expand_props(const std::string& src, std::string* dst);
+
+void panic() __attribute__((__noreturn__));
+
+// Returns the platform's Android DT directory as specified in the kernel cmdline.
+// If the platform does not configure a custom DT path, returns the standard one (based in procfs).
+const std::string& get_android_dt_dir();
+// Reads or compares the content of device tree file under the platform's Android DT directory.
+bool read_android_dt_file(const std::string& sub_path, std::string* dt_content);
+bool is_android_dt_value_expected(const std::string& sub_path, const std::string& expected_content);
+
+}  // namespace init
+}  // namespace android
+
 #endif

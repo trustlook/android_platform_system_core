@@ -14,24 +14,24 @@
  * limitations under the License.
  */
 
-#include <string.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <poll.h>
-#include <sys/wait.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
-#include <stdbool.h>
+#include <poll.h>
 #include <pthread.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
-#include <logwrap/logwrap.h>
-#include "private/android_filesystem_config.h"
-#include "cutils/log.h"
 #include <cutils/klog.h>
+#include <log/log.h>
+#include <logwrap/logwrap.h>
+#include <private/android_filesystem_config.h>
 
 #define ARRAY_SIZE(x)   (sizeof(x) / sizeof(*(x)))
 #define MIN(a,b) (((a)<(b))?(a):(b))
@@ -355,7 +355,8 @@ static int parent(const char *tag, int parent_read, pid_t pid,
         }
 
         if (poll_fds[0].revents & POLLIN) {
-            sz = read(parent_read, &buffer[b], sizeof(buffer) - 1 - b);
+            sz = TEMP_FAILURE_RETRY(
+                read(parent_read, &buffer[b], sizeof(buffer) - 1 - b));
 
             sz += b;
             // Log one line at a time
@@ -399,7 +400,7 @@ static int parent(const char *tag, int parent_read, pid_t pid,
         if (poll_fds[0].revents & POLLHUP) {
             int ret;
 
-            ret = waitpid(pid, &status, WNOHANG);
+            ret = TEMP_FAILURE_RETRY(waitpid(pid, &status, 0));
             if (ret < 0) {
                 rc = errno;
                 ALOG(LOG_ERROR, "logwrap", "waitpid failed with %s\n", strerror(errno));
@@ -473,7 +474,8 @@ static void child(int argc, char* argv[]) {
 }
 
 int android_fork_execvp_ext(int argc, char* argv[], int *status, bool ignore_int_quit,
-        int log_target, bool abbreviated, char *file_path) {
+        int log_target, bool abbreviated, char *file_path,
+        void *unused_opts, int unused_opts_len) {
     pid_t pid;
     int parent_ptty;
     int child_ptty;
@@ -483,6 +485,9 @@ int android_fork_execvp_ext(int argc, char* argv[], int *status, bool ignore_int
     sigset_t oldset;
     int rc = 0;
 
+    LOG_ALWAYS_FATAL_IF(unused_opts != NULL);
+    LOG_ALWAYS_FATAL_IF(unused_opts_len != 0);
+
     rc = pthread_mutex_lock(&fd_mutex);
     if (rc) {
         ERROR("failed to lock signal_fd mutex\n");
@@ -490,7 +495,7 @@ int android_fork_execvp_ext(int argc, char* argv[], int *status, bool ignore_int
     }
 
     /* Use ptty instead of socketpair so that STDOUT is not buffered */
-    parent_ptty = open("/dev/ptmx", O_RDWR);
+    parent_ptty = TEMP_FAILURE_RETRY(open("/dev/ptmx", O_RDWR));
     if (parent_ptty < 0) {
         ERROR("Cannot create parent ptty\n");
         rc = -1;
@@ -505,7 +510,7 @@ int android_fork_execvp_ext(int argc, char* argv[], int *status, bool ignore_int
         goto err_ptty;
     }
 
-    child_ptty = open(child_devname, O_RDWR);
+    child_ptty = TEMP_FAILURE_RETRY(open(child_devname, O_RDWR));
     if (child_ptty < 0) {
         ERROR("Cannot open child_ptty\n");
         rc = -1;
@@ -528,7 +533,6 @@ int android_fork_execvp_ext(int argc, char* argv[], int *status, bool ignore_int
         pthread_sigmask(SIG_SETMASK, &oldset, NULL);
         close(parent_ptty);
 
-        // redirect stdout and stderr
         dup2(child_ptty, 1);
         dup2(child_ptty, 2);
         close(child_ptty);

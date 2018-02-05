@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#define TRACE_TAG TRACE_SERVICES
+#define TRACE_TAG SERVICES
 
 #include "sysdeps.h"
 
@@ -31,34 +31,44 @@
 #include <unistd.h>
 #endif
 
-#include <base/file.h>
-#include <base/stringprintf.h>
-#include <base/strings.h>
+#include <thread>
+
+#include <android-base/file.h>
+#include <android-base/parsenetaddress.h>
+#include <android-base/stringprintf.h>
+#include <android-base/strings.h>
+#include <cutils/sockets.h>
 
 #if !ADB_HOST
-#include "cutils/android_reboot.h"
-#include "cutils/properties.h"
+#include <android-base/properties.h>
+#include <bootloader_message/bootloader_message.h>
+#include <cutils/android_reboot.h>
+#include <log/log_properties.h>
 #endif
 
 #include "adb.h"
 #include "adb_io.h"
+#include "adb_utils.h"
 #include "file_sync_service.h"
 #include "remount_service.h"
+#include "services.h"
+#include "shell_service.h"
+#include "socket_spec.h"
+#include "sysdeps.h"
 #include "transport.h"
 
 struct stinfo {
+    const char* service_name;
     void (*func)(int fd, void *cookie);
     int fd;
     void *cookie;
 };
 
-
-void *service_bootstrap_func(void *x)
-{
+static void service_bootstrap_func(void* x) {
     stinfo* sti = reinterpret_cast<stinfo*>(x);
+    adb_thread_setname(android::base::StringPrintf("%s svc %d", sti->service_name, sti->fd));
     sti->func(sti->fd, sti->cookie);
     free(sti);
-    return 0;
 }
 
 #if !ADB_HOST
@@ -68,15 +78,13 @@ void restart_root_service(int fd, void *cookie) {
         WriteFdExactly(fd, "adbd is already running as root\n");
         adb_close(fd);
     } else {
-        char value[PROPERTY_VALUE_MAX];
-        property_get("ro.debuggable", value, "");
-        if (strcmp(value, "1") != 0) {
+        if (!__android_log_is_debuggable()) {
             WriteFdExactly(fd, "adbd cannot run as root in production builds\n");
             adb_close(fd);
             return;
         }
 
-        property_set("service.adb.root", "1");
+        android::base::SetProperty("service.adb.root", "1");
         WriteFdExactly(fd, "restarting adbd as root\n");
         adb_close(fd);
     }
@@ -87,7 +95,7 @@ void restart_unroot_service(int fd, void *cookie) {
         WriteFdExactly(fd, "adbd not running as root\n");
         adb_close(fd);
     } else {
-        property_set("service.adb.root", "0");
+        android::base::SetProperty("service.adb.root", "0");
         WriteFdExactly(fd, "restarting adbd as non root\n");
         adb_close(fd);
     }
@@ -101,15 +109,13 @@ void restart_tcp_service(int fd, void *cookie) {
         return;
     }
 
-    char value[PROPERTY_VALUE_MAX];
-    snprintf(value, sizeof(value), "%d", port);
-    property_set("service.adb.tcp.port", value);
+    android::base::SetProperty("service.adb.tcp.port", android::base::StringPrintf("%d", port));
     WriteFdFmt(fd, "restarting in TCP mode port: %d\n", port);
     adb_close(fd);
 }
 
 void restart_usb_service(int fd, void *cookie) {
-    property_set("service.adb.tcp.port", "0");
+    android::base::SetProperty("service.adb.tcp.port", "0");
     WriteFdExactly(fd, "restarting in USB mode\n");
     adb_close(fd);
 }
@@ -131,17 +137,12 @@ static bool reboot_service_impl(int fd, const char* arg) {
             return false;
         }
 
-        const char* const recovery_dir = "/cache/recovery";
-        const char* const command_file = "/cache/recovery/command";
-        // Ensure /cache/recovery exists.
-        if (adb_mkdir(recovery_dir, 0770) == -1 && errno != EEXIST) {
-            D("Failed to create directory '%s': %s\n", recovery_dir, strerror(errno));
-            return false;
-        }
-
-        bool write_status = android::base::WriteStringToFile(
-                auto_reboot ? "--sideload_auto_reboot" : "--sideload", command_file);
-        if (!write_status) {
+        const std::vector<std::string> options = {
+            auto_reboot ? "--sideload_auto_reboot" : "--sideload"
+        };
+        std::string err;
+        if (!write_bootloader_message(options, &err)) {
+            D("Failed to set bootloader message: %s", err.c_str());
             return false;
         }
 
@@ -150,24 +151,16 @@ static bool reboot_service_impl(int fd, const char* arg) {
 
     sync();
 
-    char property_val[PROPERTY_VALUE_MAX];
-    int ret = snprintf(property_val, sizeof(property_val), "reboot,%s", reboot_arg);
-    if (ret >= static_cast<int>(sizeof(property_val))) {
-        WriteFdFmt(fd, "reboot string too long: %d\n", ret);
-        return false;
-    }
-
-    ret = property_set(ANDROID_RB_PROPERTY, property_val);
-    if (ret < 0) {
-        WriteFdFmt(fd, "reboot failed: %d\n", ret);
+    std::string reboot_string = android::base::StringPrintf("reboot,%s", reboot_arg);
+    if (!android::base::SetProperty(ANDROID_RB_PROPERTY, reboot_string)) {
+        WriteFdFmt(fd, "reboot (%s) failed\n", reboot_string.c_str());
         return false;
     }
 
     return true;
 }
 
-void reboot_service(int fd, void* arg)
-{
+void reboot_service(int fd, void* arg) {
     if (reboot_service_impl(fd, static_cast<const char*>(arg))) {
         // Don't return early. Give the reboot command time to take effect
         // to avoid messing up scripts which do "adb reboot && adb wait-for-device"
@@ -180,21 +173,69 @@ void reboot_service(int fd, void* arg)
     adb_close(fd);
 }
 
-void reverse_service(int fd, void* arg)
-{
-    const char* command = reinterpret_cast<const char*>(arg);
-
-    if (handle_forward_request(command, kTransportAny, NULL, fd) < 0) {
-        SendFail(fd, "not a reverse forwarding command");
-    }
-    free(arg);
+static void reconnect_service(int fd, void* arg) {
+    WriteFdExactly(fd, "done");
     adb_close(fd);
+    atransport* t = static_cast<atransport*>(arg);
+    kick_transport(t);
 }
 
-#endif
+int reverse_service(const char* command) {
+    int s[2];
+    if (adb_socketpair(s)) {
+        PLOG(ERROR) << "cannot create service socket pair.";
+        return -1;
+    }
+    VLOG(SERVICES) << "service socketpair: " << s[0] << ", " << s[1];
+    if (handle_forward_request(command, kTransportAny, nullptr, 0, s[1]) < 0) {
+        SendFail(s[1], "not a reverse forwarding command");
+    }
+    adb_close(s[1]);
+    return s[0];
+}
 
-static int create_service_thread(void (*func)(int, void *), void *cookie)
-{
+// Shell service string can look like:
+//   shell[,arg1,arg2,...]:[command]
+static int ShellService(const std::string& args, const atransport* transport) {
+    size_t delimiter_index = args.find(':');
+    if (delimiter_index == std::string::npos) {
+        LOG(ERROR) << "No ':' found in shell service arguments: " << args;
+        return -1;
+    }
+
+    const std::string service_args = args.substr(0, delimiter_index);
+    const std::string command = args.substr(delimiter_index + 1);
+
+    // Defaults:
+    //   PTY for interactive, raw for non-interactive.
+    //   No protocol.
+    //   $TERM set to "dumb".
+    SubprocessType type(command.empty() ? SubprocessType::kPty
+                                        : SubprocessType::kRaw);
+    SubprocessProtocol protocol = SubprocessProtocol::kNone;
+    std::string terminal_type = "dumb";
+
+    for (const std::string& arg : android::base::Split(service_args, ",")) {
+        if (arg == kShellServiceArgRaw) {
+            type = SubprocessType::kRaw;
+        } else if (arg == kShellServiceArgPty) {
+            type = SubprocessType::kPty;
+        } else if (arg == kShellServiceArgShellProtocol) {
+            protocol = SubprocessProtocol::kShell;
+        } else if (android::base::StartsWith(arg, "TERM=")) {
+            terminal_type = arg.substr(5);
+        } else if (!arg.empty()) {
+            // This is not an error to allow for future expansion.
+            LOG(WARNING) << "Ignoring unknown shell service argument: " << arg;
+        }
+    }
+
+    return StartSubprocess(command.c_str(), terminal_type.c_str(), type, protocol);
+}
+
+#endif  // !ADB_HOST
+
+static int create_service_thread(const char* service_name, void (*func)(int, void*), void* cookie) {
     int s[2];
     if (adb_socketpair(s)) {
         printf("cannot create service socket pair\n");
@@ -202,308 +243,88 @@ static int create_service_thread(void (*func)(int, void *), void *cookie)
     }
     D("socketpair: (%d,%d)", s[0], s[1]);
 
+#if !ADB_HOST
+    if (func == &file_sync_service) {
+        // Set file sync service socket to maximum size
+        int max_buf = LINUX_MAX_SOCKET_SIZE;
+        adb_setsockopt(s[0], SOL_SOCKET, SO_SNDBUF, &max_buf, sizeof(max_buf));
+        adb_setsockopt(s[1], SOL_SOCKET, SO_SNDBUF, &max_buf, sizeof(max_buf));
+    }
+#endif // !ADB_HOST
+
     stinfo* sti = reinterpret_cast<stinfo*>(malloc(sizeof(stinfo)));
     if (sti == nullptr) {
         fatal("cannot allocate stinfo");
     }
+    sti->service_name = service_name;
     sti->func = func;
     sti->cookie = cookie;
     sti->fd = s[1];
 
-    adb_thread_t t;
-    if (adb_thread_create(&t, service_bootstrap_func, sti)) {
-        free(sti);
-        adb_close(s[0]);
-        adb_close(s[1]);
-        printf("cannot create service thread\n");
-        return -1;
-    }
+    std::thread(service_bootstrap_func, sti).detach();
 
-    D("service thread started, %d:%d\n",s[0], s[1]);
+    D("service thread started, %d:%d",s[0], s[1]);
     return s[0];
 }
 
-#if !ADB_HOST
-
-static void init_subproc_child()
-{
-    setsid();
-
-    // Set OOM score adjustment to prevent killing
-    int fd = adb_open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC);
-    if (fd >= 0) {
-        adb_write(fd, "0", 1);
-        adb_close(fd);
-    } else {
-       D("adb: unable to update oom_score_adj\n");
-    }
-}
-
-static int create_subproc_pty(const char *cmd, const char *arg0, const char *arg1, pid_t *pid)
-{
-    D("create_subproc_pty(cmd=%s, arg0=%s, arg1=%s)\n", cmd, arg0, arg1);
-#if defined(_WIN32)
-    fprintf(stderr, "error: create_subproc_pty not implemented on Win32 (%s %s %s)\n", cmd, arg0, arg1);
-    return -1;
-#else
-    int ptm;
-
-    ptm = unix_open("/dev/ptmx", O_RDWR | O_CLOEXEC); // | O_NOCTTY);
-    if(ptm < 0){
-        printf("[ cannot open /dev/ptmx - %s ]\n",strerror(errno));
-        return -1;
-    }
-
-    char devname[64];
-    if(grantpt(ptm) || unlockpt(ptm) || ptsname_r(ptm, devname, sizeof(devname)) != 0) {
-        printf("[ trouble with /dev/ptmx - %s ]\n", strerror(errno));
-        adb_close(ptm);
-        return -1;
-    }
-
-    *pid = fork();
-    if(*pid < 0) {
-        printf("- fork failed: %s -\n", strerror(errno));
-        adb_close(ptm);
-        return -1;
-    }
-
-    if (*pid == 0) {
-        init_subproc_child();
-
-        int pts = unix_open(devname, O_RDWR | O_CLOEXEC);
-        if (pts < 0) {
-            fprintf(stderr, "child failed to open pseudo-term slave: %s\n", devname);
-            exit(-1);
-        }
-
-        dup2(pts, STDIN_FILENO);
-        dup2(pts, STDOUT_FILENO);
-        dup2(pts, STDERR_FILENO);
-
-        adb_close(pts);
-        adb_close(ptm);
-
-        execl(cmd, cmd, arg0, arg1, NULL);
-        fprintf(stderr, "- exec '%s' failed: %s (%d) -\n",
-                cmd, strerror(errno), errno);
-        exit(-1);
-    } else {
-        return ptm;
-    }
-#endif /* !defined(_WIN32) */
-}
-
-static int create_subproc_raw(const char *cmd, const char *arg0, const char *arg1, pid_t *pid)
-{
-    D("create_subproc_raw(cmd=%s, arg0=%s, arg1=%s)\n", cmd, arg0, arg1);
-#if defined(_WIN32)
-    fprintf(stderr, "error: create_subproc_raw not implemented on Win32 (%s %s %s)\n", cmd, arg0, arg1);
-    return -1;
-#else
-
-    // 0 is parent socket, 1 is child socket
-    int sv[2];
-    if (adb_socketpair(sv) < 0) {
-        printf("[ cannot create socket pair - %s ]\n", strerror(errno));
-        return -1;
-    }
-    D("socketpair: (%d,%d)", sv[0], sv[1]);
-
-    *pid = fork();
-    if (*pid < 0) {
-        printf("- fork failed: %s -\n", strerror(errno));
-        adb_close(sv[0]);
-        adb_close(sv[1]);
-        return -1;
-    }
-
-    if (*pid == 0) {
-        adb_close(sv[0]);
-        init_subproc_child();
-
-        dup2(sv[1], STDIN_FILENO);
-        dup2(sv[1], STDOUT_FILENO);
-        dup2(sv[1], STDERR_FILENO);
-
-        adb_close(sv[1]);
-
-        execl(cmd, cmd, arg0, arg1, NULL);
-        fprintf(stderr, "- exec '%s' failed: %s (%d) -\n",
-                cmd, strerror(errno), errno);
-        exit(-1);
-    } else {
-        adb_close(sv[1]);
-        return sv[0];
-    }
-#endif /* !defined(_WIN32) */
-}
-#endif  /* !ABD_HOST */
-
-#if ADB_HOST
-#define SHELL_COMMAND "/bin/sh"
-#else
-#define SHELL_COMMAND "/system/bin/sh"
-#endif
-
-#if !ADB_HOST
-static void subproc_waiter_service(int fd, void *cookie)
-{
-    pid_t pid = (pid_t) (uintptr_t) cookie;
-
-    D("entered. fd=%d of pid=%d\n", fd, pid);
-    while (true) {
-        int status;
-        pid_t p = waitpid(pid, &status, 0);
-        if (p == pid) {
-            D("fd=%d, post waitpid(pid=%d) status=%04x\n", fd, p, status);
-            if (WIFSIGNALED(status)) {
-                D("*** Killed by signal %d\n", WTERMSIG(status));
-                break;
-            } else if (!WIFEXITED(status)) {
-                D("*** Didn't exit!!. status %d\n", status);
-                break;
-            } else if (WEXITSTATUS(status) >= 0) {
-                D("*** Exit code %d\n", WEXITSTATUS(status));
-                break;
-            }
-         }
-    }
-    D("shell exited fd=%d of pid=%d err=%d\n", fd, pid, errno);
-    if (SHELL_EXIT_NOTIFY_FD >=0) {
-      int res;
-      res = WriteFdExactly(SHELL_EXIT_NOTIFY_FD, &fd, sizeof(fd)) ? 0 : -1;
-      D("notified shell exit via fd=%d for pid=%d res=%d errno=%d\n",
-        SHELL_EXIT_NOTIFY_FD, pid, res, errno);
-    }
-}
-
-static int create_subproc_thread(const char *name, const subproc_mode mode)
-{
-    adb_thread_t t;
-    int ret_fd;
-    pid_t pid = -1;
-
-    const char *arg0, *arg1;
-    if (name == 0 || *name == 0) {
-        arg0 = "-"; arg1 = 0;
-    } else {
-        arg0 = "-c"; arg1 = name;
-    }
-
-    switch (mode) {
-    case SUBPROC_PTY:
-        ret_fd = create_subproc_pty(SHELL_COMMAND, arg0, arg1, &pid);
-        break;
-    case SUBPROC_RAW:
-        ret_fd = create_subproc_raw(SHELL_COMMAND, arg0, arg1, &pid);
-        break;
-    default:
-        fprintf(stderr, "invalid subproc_mode %d\n", mode);
-        return -1;
-    }
-    D("create_subproc ret_fd=%d pid=%d\n", ret_fd, pid);
-
-    stinfo* sti = reinterpret_cast<stinfo*>(malloc(sizeof(stinfo)));
-    if(sti == 0) fatal("cannot allocate stinfo");
-    sti->func = subproc_waiter_service;
-    sti->cookie = (void*) (uintptr_t) pid;
-    sti->fd = ret_fd;
-
-    if (adb_thread_create(&t, service_bootstrap_func, sti)) {
-        free(sti);
-        adb_close(ret_fd);
-        fprintf(stderr, "cannot create service thread\n");
-        return -1;
-    }
-
-    D("service thread started, fd=%d pid=%d\n", ret_fd, pid);
-    return ret_fd;
-}
-#endif
-
-int service_to_fd(const char *name)
-{
+int service_to_fd(const char* name, const atransport* transport) {
     int ret = -1;
 
-    if(!strncmp(name, "tcp:", 4)) {
-        int port = atoi(name + 4);
-        name = strchr(name + 4, ':');
-        if(name == 0) {
-            ret = socket_loopback_client(port, SOCK_STREAM);
-            if (ret >= 0)
-                disable_tcp_nagle(ret);
-        } else {
-#if ADB_HOST
-            ret = socket_network_client(name + 1, port, SOCK_STREAM);
-#else
-            return -1;
-#endif
+    if (is_socket_spec(name)) {
+        std::string error;
+        ret = socket_spec_connect(name, &error);
+        if (ret < 0) {
+            LOG(ERROR) << "failed to connect to socket '" << name << "': " << error;
         }
-#ifndef HAVE_WINSOCK   /* winsock doesn't implement unix domain sockets */
-    } else if(!strncmp(name, "local:", 6)) {
-        ret = socket_local_client(name + 6,
-                ANDROID_SOCKET_NAMESPACE_RESERVED, SOCK_STREAM);
-    } else if(!strncmp(name, "localreserved:", 14)) {
-        ret = socket_local_client(name + 14,
-                ANDROID_SOCKET_NAMESPACE_RESERVED, SOCK_STREAM);
-    } else if(!strncmp(name, "localabstract:", 14)) {
-        ret = socket_local_client(name + 14,
-                ANDROID_SOCKET_NAMESPACE_ABSTRACT, SOCK_STREAM);
-    } else if(!strncmp(name, "localfilesystem:", 16)) {
-        ret = socket_local_client(name + 16,
-                ANDROID_SOCKET_NAMESPACE_FILESYSTEM, SOCK_STREAM);
-#endif
 #if !ADB_HOST
     } else if(!strncmp("dev:", name, 4)) {
         ret = unix_open(name + 4, O_RDWR | O_CLOEXEC);
     } else if(!strncmp(name, "framebuffer:", 12)) {
-        ret = create_service_thread(framebuffer_service, 0);
+        ret = create_service_thread("fb", framebuffer_service, nullptr);
     } else if (!strncmp(name, "jdwp:", 5)) {
         ret = create_jdwp_connection_fd(atoi(name+5));
-    } else if(!HOST && !strncmp(name, "shell:", 6)) {
-        ret = create_subproc_thread(name + 6, SUBPROC_PTY);
-    } else if(!HOST && !strncmp(name, "exec:", 5)) {
-        ret = create_subproc_thread(name + 5, SUBPROC_RAW);
+    } else if(!strncmp(name, "shell", 5)) {
+        ret = ShellService(name + 5, transport);
+    } else if(!strncmp(name, "exec:", 5)) {
+        ret = StartSubprocess(name + 5, nullptr, SubprocessType::kRaw, SubprocessProtocol::kNone);
     } else if(!strncmp(name, "sync:", 5)) {
-        ret = create_service_thread(file_sync_service, NULL);
+        ret = create_service_thread("sync", file_sync_service, nullptr);
     } else if(!strncmp(name, "remount:", 8)) {
-        ret = create_service_thread(remount_service, NULL);
+        ret = create_service_thread("remount", remount_service, nullptr);
     } else if(!strncmp(name, "reboot:", 7)) {
         void* arg = strdup(name + 7);
         if (arg == NULL) return -1;
-        ret = create_service_thread(reboot_service, arg);
+        ret = create_service_thread("reboot", reboot_service, arg);
     } else if(!strncmp(name, "root:", 5)) {
-        ret = create_service_thread(restart_root_service, NULL);
+        ret = create_service_thread("root", restart_root_service, nullptr);
     } else if(!strncmp(name, "unroot:", 7)) {
-        ret = create_service_thread(restart_unroot_service, NULL);
+        ret = create_service_thread("unroot", restart_unroot_service, nullptr);
     } else if(!strncmp(name, "backup:", 7)) {
-        ret = create_subproc_thread(android::base::StringPrintf("/system/bin/bu backup %s",
-                                                                (name + 7)).c_str(), SUBPROC_RAW);
+        ret = StartSubprocess(android::base::StringPrintf("/system/bin/bu backup %s",
+                                                          (name + 7)).c_str(),
+                              nullptr, SubprocessType::kRaw, SubprocessProtocol::kNone);
     } else if(!strncmp(name, "restore:", 8)) {
-        ret = create_subproc_thread("/system/bin/bu restore", SUBPROC_RAW);
+        ret = StartSubprocess("/system/bin/bu restore", nullptr, SubprocessType::kRaw,
+                              SubprocessProtocol::kNone);
     } else if(!strncmp(name, "tcpip:", 6)) {
         int port;
         if (sscanf(name + 6, "%d", &port) != 1) {
-            port = 0;
+            return -1;
         }
-        ret = create_service_thread(restart_tcp_service, (void *) (uintptr_t) port);
+        ret = create_service_thread("tcp", restart_tcp_service, reinterpret_cast<void*>(port));
     } else if(!strncmp(name, "usb:", 4)) {
-        ret = create_service_thread(restart_usb_service, NULL);
+        ret = create_service_thread("usb", restart_usb_service, nullptr);
     } else if (!strncmp(name, "reverse:", 8)) {
-        char* cookie = strdup(name + 8);
-        if (cookie == NULL) {
-            ret = -1;
-        } else {
-            ret = create_service_thread(reverse_service, cookie);
-            if (ret < 0) {
-                free(cookie);
-            }
-        }
+        ret = reverse_service(name + 8);
     } else if(!strncmp(name, "disable-verity:", 15)) {
-        ret = create_service_thread(set_verity_enabled_state_service, (void*)0);
+        ret = create_service_thread("verity-on", set_verity_enabled_state_service,
+                                    reinterpret_cast<void*>(0));
     } else if(!strncmp(name, "enable-verity:", 15)) {
-        ret = create_service_thread(set_verity_enabled_state_service, (void*)1);
+        ret = create_service_thread("verity-off", set_verity_enabled_state_service,
+                                    reinterpret_cast<void*>(1));
+    } else if (!strcmp(name, "reconnect")) {
+        ret = create_service_thread("reconnect", reconnect_service,
+                                    const_cast<atransport*>(transport));
 #endif
     }
     if (ret >= 0) {
@@ -514,71 +335,47 @@ int service_to_fd(const char *name)
 
 #if ADB_HOST
 struct state_info {
-    transport_type transport;
-    char* serial;
-    int state;
+    TransportType transport_type;
+    std::string serial;
+    TransportId transport_id;
+    ConnectionState state;
 };
 
-static void wait_for_state(int fd, void* cookie)
-{
-    state_info* sinfo = reinterpret_cast<state_info*>(cookie);
+static void wait_for_state(int fd, void* data) {
+    std::unique_ptr<state_info> sinfo(reinterpret_cast<state_info*>(data));
 
-    D("wait_for_state %d\n", sinfo->state);
+    D("wait_for_state %d", sinfo->state);
 
-    std::string error_msg = "unknown error";
-    atransport* t = acquire_one_transport(sinfo->state, sinfo->transport, sinfo->serial, &error_msg);
-    if (t != 0) {
-        SendOkay(fd);
-    } else {
-        SendFail(fd, error_msg);
-    }
+    while (true) {
+        bool is_ambiguous = false;
+        std::string error = "unknown error";
+        const char* serial = sinfo->serial.length() ? sinfo->serial.c_str() : NULL;
+        atransport* t = acquire_one_transport(sinfo->transport_type, serial, sinfo->transport_id,
+                                              &is_ambiguous, &error);
+        if (t != nullptr && (sinfo->state == kCsAny || sinfo->state == t->GetConnectionState())) {
+            SendOkay(fd);
+            break;
+        } else if (!is_ambiguous) {
+            adb_pollfd pfd = {.fd = fd, .events = POLLIN };
+            int rc = adb_poll(&pfd, 1, 1000);
+            if (rc < 0) {
+                SendFail(fd, error);
+                break;
+            } else if (rc > 0 && (pfd.revents & POLLHUP) != 0) {
+                // The other end of the socket is closed, probably because the other side was
+                // terminated, bail out.
+                break;
+            }
 
-    if (sinfo->serial)
-        free(sinfo->serial);
-    free(sinfo);
-    adb_close(fd);
-    D("wait_for_state is done\n");
-}
-
-static void connect_device(const std::string& host, std::string* response) {
-    if (host.empty()) {
-        *response = "empty host name";
-        return;
-    }
-
-    std::vector<std::string> pieces = android::base::Split(host, ":");
-    const std::string& hostname = pieces[0];
-
-    int port = DEFAULT_ADB_LOCAL_TRANSPORT_PORT;
-    if (pieces.size() > 1) {
-        if (sscanf(pieces[1].c_str(), "%d", &port) != 1) {
-            *response = android::base::StringPrintf("bad port number %s", pieces[1].c_str());
-            return;
+            // Try again...
+        } else {
+            SendFail(fd, error);
+            break;
         }
     }
 
-    // This may look like we're putting 'host' back together,
-    // but we're actually inserting the default port if necessary.
-    std::string serial = android::base::StringPrintf("%s:%d", hostname.c_str(), port);
-
-    int fd = socket_network_client_timeout(hostname.c_str(), port, SOCK_STREAM, 10);
-    if (fd < 0) {
-        *response = android::base::StringPrintf("unable to connect to %s:%d",
-                                                hostname.c_str(), port);
-        return;
-    }
-
-    D("client: connected on remote on fd %d\n", fd);
-    close_on_exec(fd);
-    disable_tcp_nagle(fd);
-
-    int ret = register_socket_transport(fd, serial.c_str(), port, 0);
-    if (ret < 0) {
-        adb_close(fd);
-        *response = android::base::StringPrintf("already connected to %s", serial.c_str());
-    } else {
-        *response = android::base::StringPrintf("connected to %s", serial.c_str());
-    }
+    adb_close(fd);
+    D("wait_for_state is done");
 }
 
 void connect_emulator(const std::string& port_spec, std::string* response) {
@@ -618,25 +415,25 @@ void connect_emulator(const std::string& port_spec, std::string* response) {
     }
 
     // Preconditions met, try to connect to the emulator.
-    if (!local_connect_arbitrary_ports(console_port, adb_port)) {
+    std::string error;
+    if (!local_connect_arbitrary_ports(console_port, adb_port, &error)) {
         *response = android::base::StringPrintf("Connected to emulator on ports %d,%d",
                                                 console_port, adb_port);
     } else {
-        *response = android::base::StringPrintf("Could not connect to emulator on ports %d,%d",
-                                                console_port, adb_port);
+        *response = android::base::StringPrintf("Could not connect to emulator on ports %d,%d: %s",
+                                                console_port, adb_port, error.c_str());
     }
 }
 
-static void connect_service(int fd, void* cookie)
-{
-    char *host = reinterpret_cast<char*>(cookie);
-
+static void connect_service(int fd, void* data) {
+    char* host = reinterpret_cast<char*>(data);
     std::string response;
     if (!strncmp(host, "emu:", 4)) {
         connect_emulator(host + 4, &response);
     } else {
         connect_device(host, &response);
     }
+    free(host);
 
     // Send response for emulator and device
     SendProtocolString(fd, response);
@@ -645,43 +442,59 @@ static void connect_service(int fd, void* cookie)
 #endif
 
 #if ADB_HOST
-asocket*  host_service_to_socket(const char*  name, const char *serial)
-{
+asocket* host_service_to_socket(const char* name, const char* serial, TransportId transport_id) {
     if (!strcmp(name,"track-devices")) {
         return create_device_tracker();
-    } else if (!strncmp(name, "wait-for-", strlen("wait-for-"))) {
-        auto sinfo = reinterpret_cast<state_info*>(malloc(sizeof(state_info)));
-        if (sinfo == nullptr) {
-            fprintf(stderr, "couldn't allocate state_info: %s", strerror(errno));
-            return NULL;
-        }
-
-        if (serial)
-            sinfo->serial = strdup(serial);
-        else
-            sinfo->serial = NULL;
-
+    } else if (android::base::StartsWith(name, "wait-for-")) {
         name += strlen("wait-for-");
 
-        if (!strncmp(name, "local", strlen("local"))) {
-            sinfo->transport = kTransportLocal;
-            sinfo->state = CS_DEVICE;
-        } else if (!strncmp(name, "usb", strlen("usb"))) {
-            sinfo->transport = kTransportUsb;
-            sinfo->state = CS_DEVICE;
-        } else if (!strncmp(name, "any", strlen("any"))) {
-            sinfo->transport = kTransportAny;
-            sinfo->state = CS_DEVICE;
-        } else {
-            free(sinfo);
-            return NULL;
+        std::unique_ptr<state_info> sinfo(new state_info);
+        if (sinfo == nullptr) {
+            fprintf(stderr, "couldn't allocate state_info: %s", strerror(errno));
+            return nullptr;
         }
 
-        int fd = create_service_thread(wait_for_state, sinfo);
+        if (serial) sinfo->serial = serial;
+        sinfo->transport_id = transport_id;
+
+        if (android::base::StartsWith(name, "local")) {
+            name += strlen("local");
+            sinfo->transport_type = kTransportLocal;
+        } else if (android::base::StartsWith(name, "usb")) {
+            name += strlen("usb");
+            sinfo->transport_type = kTransportUsb;
+        } else if (android::base::StartsWith(name, "any")) {
+            name += strlen("any");
+            sinfo->transport_type = kTransportAny;
+        } else {
+            return nullptr;
+        }
+
+        if (!strcmp(name, "-device")) {
+            sinfo->state = kCsDevice;
+        } else if (!strcmp(name, "-recovery")) {
+            sinfo->state = kCsRecovery;
+        } else if (!strcmp(name, "-sideload")) {
+            sinfo->state = kCsSideload;
+        } else if (!strcmp(name, "-bootloader")) {
+            sinfo->state = kCsBootloader;
+        } else if (!strcmp(name, "-any")) {
+            sinfo->state = kCsAny;
+        } else {
+            return nullptr;
+        }
+
+        int fd = create_service_thread("wait", wait_for_state, sinfo.get());
+        if (fd != -1) {
+            sinfo.release();
+        }
         return create_local_socket(fd);
     } else if (!strncmp(name, "connect:", 8)) {
-        const char *host = name + 8;
-        int fd = create_service_thread(connect_service, (void *)host);
+        char* host = strdup(name + 8);
+        int fd = create_service_thread("connect", connect_service, host);
+        if (fd == -1) {
+            free(host);
+        }
         return create_local_socket(fd);
     }
     return NULL;

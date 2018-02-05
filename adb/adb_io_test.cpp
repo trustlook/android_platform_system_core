@@ -27,39 +27,29 @@
 
 #include <string>
 
-#include "base/file.h"
+#include <android-base/file.h>
+#include <android-base/test_utils.h>
 
-class TemporaryFile {
- public:
-  TemporaryFile() {
-    init("/data/local/tmp");
-    if (fd == -1) {
-      init("/tmp");
-    }
-  }
+// All of these tests fail on Windows because they use the C Runtime open(),
+// but the adb_io APIs expect file descriptors from adb_open(). This could
+// theoretically be fixed by making adb_read()/adb_write() fallback to using
+// read()/write() if an unrecognized fd is used, and by making adb_open() return
+// fds far from the range that open() returns. But all of that might defeat the
+// purpose of the tests.
 
-  ~TemporaryFile() {
-    close(fd);
-    unlink(filename);
-  }
+#if defined(_WIN32)
+#define POSIX_TEST(x,y) TEST(DISABLED_ ## x,y)
+#else
+#define POSIX_TEST TEST
+#endif
 
-  int fd;
-  char filename[1024];
-
- private:
-  void init(const char* tmp_dir) {
-    snprintf(filename, sizeof(filename), "%s/TemporaryFile-XXXXXX", tmp_dir);
-    fd = mkstemp(filename);
-  }
-};
-
-TEST(io, ReadFdExactly_whole) {
+POSIX_TEST(io, ReadFdExactly_whole) {
   const char expected[] = "Foobar";
   TemporaryFile tf;
   ASSERT_NE(-1, tf.fd);
 
   ASSERT_TRUE(android::base::WriteStringToFd(expected, tf.fd)) << strerror(errno);
-  ASSERT_EQ(0, lseek(tf.fd, SEEK_SET, 0));
+  ASSERT_EQ(0, lseek(tf.fd, 0, SEEK_SET));
 
   // Test reading the whole file.
   char buf[sizeof(expected)] = {};
@@ -67,13 +57,13 @@ TEST(io, ReadFdExactly_whole) {
   EXPECT_STREQ(expected, buf);
 }
 
-TEST(io, ReadFdExactly_eof) {
+POSIX_TEST(io, ReadFdExactly_eof) {
   const char expected[] = "Foobar";
   TemporaryFile tf;
   ASSERT_NE(-1, tf.fd);
 
   ASSERT_TRUE(android::base::WriteStringToFd(expected, tf.fd)) << strerror(errno);
-  ASSERT_EQ(0, lseek(tf.fd, SEEK_SET, 0));
+  ASSERT_EQ(0, lseek(tf.fd, 0, SEEK_SET));
 
   // Test that not having enough data will fail.
   char buf[sizeof(expected) + 1] = {};
@@ -81,13 +71,13 @@ TEST(io, ReadFdExactly_eof) {
   EXPECT_EQ(0, errno) << strerror(errno);
 }
 
-TEST(io, ReadFdExactly_partial) {
+POSIX_TEST(io, ReadFdExactly_partial) {
   const char input[] = "Foobar";
   TemporaryFile tf;
   ASSERT_NE(-1, tf.fd);
 
   ASSERT_TRUE(android::base::WriteStringToFd(input, tf.fd)) << strerror(errno);
-  ASSERT_EQ(0, lseek(tf.fd, SEEK_SET, 0));
+  ASSERT_EQ(0, lseek(tf.fd, 0, SEEK_SET));
 
   // Test reading a partial file.
   char buf[sizeof(input) - 1] = {};
@@ -98,7 +88,7 @@ TEST(io, ReadFdExactly_partial) {
   EXPECT_STREQ(expected.c_str(), buf);
 }
 
-TEST(io, WriteFdExactly_whole) {
+POSIX_TEST(io, WriteFdExactly_whole) {
   const char expected[] = "Foobar";
   TemporaryFile tf;
   ASSERT_NE(-1, tf.fd);
@@ -106,21 +96,21 @@ TEST(io, WriteFdExactly_whole) {
   // Test writing the whole string to the file.
   ASSERT_TRUE(WriteFdExactly(tf.fd, expected, sizeof(expected)))
     << strerror(errno);
-  ASSERT_EQ(0, lseek(tf.fd, SEEK_SET, 0));
+  ASSERT_EQ(0, lseek(tf.fd, 0, SEEK_SET));
 
   std::string s;
   ASSERT_TRUE(android::base::ReadFdToString(tf.fd, &s));
   EXPECT_STREQ(expected, s.c_str());
 }
 
-TEST(io, WriteFdExactly_partial) {
+POSIX_TEST(io, WriteFdExactly_partial) {
   const char buf[] = "Foobar";
   TemporaryFile tf;
   ASSERT_NE(-1, tf.fd);
 
   // Test writing a partial string to the file.
   ASSERT_TRUE(WriteFdExactly(tf.fd, buf, sizeof(buf) - 2)) << strerror(errno);
-  ASSERT_EQ(0, lseek(tf.fd, SEEK_SET, 0));
+  ASSERT_EQ(0, lseek(tf.fd, 0, SEEK_SET));
 
   std::string expected(buf);
   expected.pop_back();
@@ -130,7 +120,7 @@ TEST(io, WriteFdExactly_partial) {
   EXPECT_EQ(expected, s);
 }
 
-TEST(io, WriteFdExactly_ENOSPC) {
+POSIX_TEST(io, WriteFdExactly_ENOSPC) {
     int fd = open("/dev/full", O_WRONLY);
     ASSERT_NE(-1, fd);
 
@@ -139,27 +129,27 @@ TEST(io, WriteFdExactly_ENOSPC) {
     ASSERT_EQ(ENOSPC, errno);
 }
 
-TEST(io, WriteFdExactly_string) {
+POSIX_TEST(io, WriteFdExactly_string) {
   const char str[] = "Foobar";
   TemporaryFile tf;
   ASSERT_NE(-1, tf.fd);
 
   // Test writing a partial string to the file.
   ASSERT_TRUE(WriteFdExactly(tf.fd, str)) << strerror(errno);
-  ASSERT_EQ(0, lseek(tf.fd, SEEK_SET, 0));
+  ASSERT_EQ(0, lseek(tf.fd, 0, SEEK_SET));
 
   std::string s;
   ASSERT_TRUE(android::base::ReadFdToString(tf.fd, &s));
   EXPECT_STREQ(str, s.c_str());
 }
 
-TEST(io, WriteFdFmt) {
+POSIX_TEST(io, WriteFdFmt) {
     TemporaryFile tf;
     ASSERT_NE(-1, tf.fd);
 
     // Test writing a partial string to the file.
     ASSERT_TRUE(WriteFdFmt(tf.fd, "Foo%s%d", "bar", 123)) << strerror(errno);
-    ASSERT_EQ(0, lseek(tf.fd, SEEK_SET, 0));
+    ASSERT_EQ(0, lseek(tf.fd, 0, SEEK_SET));
 
     std::string s;
     ASSERT_TRUE(android::base::ReadFdToString(tf.fd, &s));

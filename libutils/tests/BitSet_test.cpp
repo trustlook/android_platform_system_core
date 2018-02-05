@@ -16,10 +16,11 @@
 
 #define LOG_TAG "BitSet_test"
 
-#include <utils/BitSet.h>
-#include <cutils/log.h>
-#include <gtest/gtest.h>
 #include <unistd.h>
+
+#include <android/log.h>
+#include <gtest/gtest.h>
+#include <utils/BitSet.h>
 
 namespace android {
 
@@ -138,11 +139,11 @@ TEST_F(BitSet32Test, FillAndClear) {
 TEST_F(BitSet32Test, GetIndexOfBit) {
     b1.markBit(1);
     b1.markBit(4);
-    EXPECT_EQ(b1.getIndexOfBit(1), 0);
-    EXPECT_EQ(b1.getIndexOfBit(4), 1);
+    EXPECT_EQ(0U, b1.getIndexOfBit(1));
+    EXPECT_EQ(1U, b1.getIndexOfBit(4));
     b1.markFirstUnmarkedBit();
-    EXPECT_EQ(b1.getIndexOfBit(1), 1);
-    EXPECT_EQ(b1.getIndexOfBit(4), 2);
+    EXPECT_EQ(1U, b1.getIndexOfBit(1));
+    EXPECT_EQ(2U, b1.getIndexOfBit(4));
 }
 
 class BitSet64Test : public testing::Test {
@@ -260,11 +261,11 @@ TEST_F(BitSet64Test, FillAndClear) {
 TEST_F(BitSet64Test, GetIndexOfBit) {
     b1.markBit(10);
     b1.markBit(40);
-    EXPECT_EQ(b1.getIndexOfBit(10), 0);
-    EXPECT_EQ(b1.getIndexOfBit(40), 1);
+    EXPECT_EQ(0U, b1.getIndexOfBit(10));
+    EXPECT_EQ(1U, b1.getIndexOfBit(40));
     b1.markFirstUnmarkedBit();
-    EXPECT_EQ(b1.getIndexOfBit(10), 1);
-    EXPECT_EQ(b1.getIndexOfBit(40), 2);
+    EXPECT_EQ(1U, b1.getIndexOfBit(10));
+    EXPECT_EQ(2U, b1.getIndexOfBit(40));
 }
 
 } // namespace android

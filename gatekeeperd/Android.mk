@@ -21,8 +21,7 @@ LOCAL_CFLAGS := -Wall -Wextra -Werror -Wunused
 LOCAL_SRC_FILES := \
 	SoftGateKeeperDevice.cpp \
 	IGateKeeperService.cpp \
-	gatekeeperd.cpp \
-	IUserManager.cpp
+	gatekeeperd.cpp
 
 LOCAL_MODULE := gatekeeperd
 LOCAL_SHARED_LIBRARIES := \
@@ -33,9 +32,15 @@ LOCAL_SHARED_LIBRARIES := \
 	libbase \
 	libutils \
 	libcrypto \
-	libkeystore_binder
+	libkeystore_binder \
+	libhidlbase \
+	libhidltransport \
+	libhwbinder \
+	android.hardware.gatekeeper@1.0 \
+
 LOCAL_STATIC_LIBRARIES := libscrypt_static
 LOCAL_C_INCLUDES := external/scrypt/lib/crypto
+LOCAL_INIT_RC := gatekeeperd.rc
 include $(BUILD_EXECUTABLE)
 
 include $(call first-makefiles-under,$(LOCAL_PATH))

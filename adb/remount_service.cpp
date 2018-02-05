@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#define TRACE_TAG TRACE_ADB
+#define TRACE_TAG ADB
 
 #include "sysdeps.h"
 
@@ -29,13 +29,15 @@
 
 #include <string>
 
+#include <android-base/properties.h>
+
 #include "adb.h"
 #include "adb_io.h"
 #include "adb_utils.h"
-#include "cutils/properties.h"
+#include "fs_mgr.h"
 
 // Returns the device used to mount a directory in /proc/mounts.
-static std::string find_mount(const char* dir) {
+static std::string find_proc_mount(const char* dir) {
     std::unique_ptr<FILE, int(*)(FILE*)> fp(setmntent("/proc/mounts", "r"), endmntent);
     if (!fp) {
         return "";
@@ -50,6 +52,24 @@ static std::string find_mount(const char* dir) {
     return "";
 }
 
+// Returns the device used to mount a directory in the fstab.
+static std::string find_fstab_mount(const char* dir) {
+    std::unique_ptr<fstab, decltype(&fs_mgr_free_fstab)> fstab(fs_mgr_read_fstab_default(),
+                                                               fs_mgr_free_fstab);
+    struct fstab_rec* rec = fs_mgr_get_entry_for_mount_point(fstab.get(), dir);
+    return rec ? rec->blk_device : "";
+}
+
+// The proc entry for / is full of lies, so check fstab instead.
+// /proc/mounts lists rootfs and /dev/root, neither of which is what we want.
+static std::string find_mount(const char* dir) {
+    if (strcmp(dir, "/") == 0) {
+       return find_fstab_mount(dir);
+    } else {
+       return find_proc_mount(dir);
+    }
+}
+
 bool make_block_device_writable(const std::string& dev) {
     int fd = unix_open(dev.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd == -1) {
@@ -58,7 +78,7 @@ bool make_block_device_writable(const std::string& dev) {
 
     int OFF = 0;
     bool result = (ioctl(fd, BLKROSET, &OFF) != -1);
-    adb_close(fd);
+    unix_close(fd);
     return result;
 }
 
@@ -89,12 +109,8 @@ void remount_service(int fd, void* cookie) {
         return;
     }
 
-    char prop_buf[PROPERTY_VALUE_MAX];
-    property_get("partition.system.verified", prop_buf, "");
-    bool system_verified = (strlen(prop_buf) > 0);
-
-    property_get("partition.vendor.verified", prop_buf, "");
-    bool vendor_verified = (strlen(prop_buf) > 0);
+    bool system_verified = !(android::base::GetProperty("partition.system.verified", "").empty());
+    bool vendor_verified = !(android::base::GetProperty("partition.vendor.verified", "").empty());
 
     if (system_verified || vendor_verified) {
         // Allow remount but warn of likely bad effects
@@ -112,7 +128,11 @@ void remount_service(int fd, void* cookie) {
     }
 
     bool success = true;
-    success &= remount_partition(fd, "/system");
+    if (android::base::GetBoolProperty("ro.build.system_root_image", false)) {
+        success &= remount_partition(fd, "/");
+    } else {
+        success &= remount_partition(fd, "/system");
+    }
     success &= remount_partition(fd, "/vendor");
     success &= remount_partition(fd, "/oem");
 

@@ -30,8 +30,9 @@ namespace android {
 class BatteryPropertiesRegistrar : public BnBatteryPropertiesRegistrar,
                                    public IBinder::DeathRecipient {
 public:
-    void publish();
-    void notifyListeners(struct BatteryProperties props);
+    void publish(const sp<BatteryPropertiesRegistrar>& service);
+    void notifyListeners(const struct BatteryProperties& props);
+    void scheduleUpdate();
 
 private:
     Mutex mRegistrationLock;

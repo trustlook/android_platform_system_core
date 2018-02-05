@@ -14,49 +14,50 @@
  * limitations under the License.
  */
 
-#include <stdlib.h>
-#include <string.h>
-#include <sys/uio.h>
-
-#include <selinux/selinux.h>
-
 #include "log.h"
 
-static void init_klog_vwrite(int level, const char* fmt, va_list ap) {
-    static const char* tag = basename(getprogname());
+#include <fcntl.h>
+#include <linux/audit.h>
+#include <string.h>
 
-    char prefix[64];
-    snprintf(prefix, sizeof(prefix), "<%d>%s: ", level, tag);
+#include <android-base/logging.h>
+#include <selinux/selinux.h>
 
-    char msg[512];
-    vsnprintf(msg, sizeof(msg), fmt, ap);
+namespace android {
+namespace init {
 
-    iovec iov[2];
-    iov[0].iov_base = prefix;
-    iov[0].iov_len = strlen(prefix);
-    iov[1].iov_base = msg;
-    iov[1].iov_len = strlen(msg);
+void InitKernelLogging(char* argv[]) {
+    // Make stdin/stdout/stderr all point to /dev/null.
+    int fd = open("/sys/fs/selinux/null", O_RDWR);
+    if (fd == -1) {
+        int saved_errno = errno;
+        android::base::InitLogging(argv, &android::base::KernelLogger);
+        errno = saved_errno;
+        PLOG(FATAL) << "Couldn't open /sys/fs/selinux/null";
+    }
+    dup2(fd, 0);
+    dup2(fd, 1);
+    dup2(fd, 2);
+    if (fd > 2) close(fd);
 
-    klog_writev(level, iov, 2);
-}
-
-void init_klog_write(int level, const char* fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    init_klog_vwrite(level, fmt, ap);
-    va_end(ap);
+    android::base::InitLogging(argv, &android::base::KernelLogger);
 }
 
 int selinux_klog_callback(int type, const char *fmt, ...) {
-    int level = KLOG_ERROR_LEVEL;
+    android::base::LogSeverity severity = android::base::ERROR;
     if (type == SELINUX_WARNING) {
-        level = KLOG_WARNING_LEVEL;
+        severity = android::base::WARNING;
     } else if (type == SELINUX_INFO) {
-        level = KLOG_INFO_LEVEL;
+        severity = android::base::INFO;
     }
+    char buf[1024];
     va_list ap;
     va_start(ap, fmt);
-    init_klog_vwrite(level, fmt, ap);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    android::base::KernelLogger(android::base::MAIN, severity, "selinux", nullptr, 0, buf);
     return 0;
 }
+
+}  // namespace init
+}  // namespace android

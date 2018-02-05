@@ -13,17 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <errno.h>
-
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <linux/netlink.h>
-#include <string.h>
 
 #define LOG_TAG "NetlinkListener"
-#include <cutils/log.h>
-#include <cutils/uevent.h>
 
+#include <errno.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <linux/netlink.h> /* out of order because must follow sys/socket.h */
+
+#include <cutils/uevent.h>
+#include <log/log.h>
 #include <sysutils/NetlinkEvent.h>
 
 #if 1
@@ -55,8 +57,6 @@ bool NetlinkListener::onDataAvailable(SocketClient *cli)
     count = TEMP_FAILURE_RETRY(uevent_kernel_recv(socket,
             mBuffer, sizeof(mBuffer), require_group, &uid));
     if (count < 0) {
-        if (uid > 0)
-            LOG_EVENT_INT(65537, uid);
         SLOGE("recvmsg failed (%s)", strerror(errno));
         return false;
     }

@@ -5,53 +5,58 @@ LOCAL_PATH:= $(call my-dir)
 # --
 
 ifneq (,$(filter userdebug eng,$(TARGET_BUILD_VARIANT)))
-init_options += -DALLOW_LOCAL_PROP_OVERRIDE=1 -DALLOW_DISABLE_SELINUX=1
+init_options += \
+    -DALLOW_LOCAL_PROP_OVERRIDE=1 \
+    -DALLOW_PERMISSIVE_SELINUX=1 \
+    -DREBOOT_BOOTLOADER_ON_PANIC=1 \
+    -DDUMP_ON_UMOUNT_FAILURE=1
 else
-init_options += -DALLOW_LOCAL_PROP_OVERRIDE=0 -DALLOW_DISABLE_SELINUX=0
+init_options += \
+    -DALLOW_LOCAL_PROP_OVERRIDE=0 \
+    -DALLOW_PERMISSIVE_SELINUX=0 \
+    -DREBOOT_BOOTLOADER_ON_PANIC=0 \
+    -DDUMP_ON_UMOUNT_FAILURE=0
+endif
+
+ifneq (,$(filter eng,$(TARGET_BUILD_VARIANT)))
+init_options += \
+    -DSHUTDOWN_ZERO_TIMEOUT=1
+else
+init_options += \
+    -DSHUTDOWN_ZERO_TIMEOUT=0
 endif
 
 init_options += -DLOG_UEVENTS=0
+
+ifeq ($(TARGET_USER_MODE_LINUX), true)
+    init_cflags += -DUSER_MODE_LINUX
+endif
 
 init_cflags += \
     $(init_options) \
     -Wall -Wextra \
     -Wno-unused-parameter \
     -Werror \
-
-init_clang := true
+    -std=gnu++1z \
 
 # --
 
 include $(CLEAR_VARS)
 LOCAL_CPPFLAGS := $(init_cflags)
 LOCAL_SRC_FILES:= \
-    init_parser.cpp \
-    log.cpp \
-    parser.cpp \
-    util.cpp \
-
-LOCAL_STATIC_LIBRARIES := libbase
-LOCAL_MODULE := libinit
-LOCAL_CLANG := $(init_clang)
-include $(BUILD_STATIC_LIBRARY)
-
-include $(CLEAR_VARS)
-LOCAL_CPPFLAGS := $(init_cflags)
-LOCAL_SRC_FILES:= \
     bootchart.cpp \
     builtins.cpp \
-    devices.cpp \
     init.cpp \
+    init_first_stage.cpp \
     keychords.cpp \
     property_service.cpp \
+    reboot.cpp \
     signal_handler.cpp \
     ueventd.cpp \
-    ueventd_parser.cpp \
     watchdogd.cpp \
 
 LOCAL_MODULE:= init
 LOCAL_C_INCLUDES += \
-    system/extras/ext4_utils \
     system/core/mkbootimg
 
 LOCAL_FORCE_STATIC_EXECUTABLE := true
@@ -60,43 +65,37 @@ LOCAL_UNSTRIPPED_PATH := $(TARGET_ROOT_OUT_UNSTRIPPED)
 
 LOCAL_STATIC_LIBRARIES := \
     libinit \
+    libbootloader_message \
     libfs_mgr \
+    libfec \
+    libfec_rs \
     libsquashfs_utils \
     liblogwrap \
+    libext4_utils \
     libcutils \
     libbase \
-    libext4_utils_static \
-    libutils \
-    liblog \
     libc \
     libselinux \
-    libmincrypt \
+    liblog \
+    libcrypto_utils \
+    libcrypto \
     libc++_static \
     libdl \
-    libsparse_static \
-    libz
+    libsparse \
+    libz \
+    libprocessgroup \
+    libavb \
+    libkeyutils \
 
-# Create symlinks
+LOCAL_REQUIRED_MODULES := \
+    e2fsdroid \
+    mke2fs \
+
+# Create symlinks.
 LOCAL_POST_INSTALL_CMD := $(hide) mkdir -p $(TARGET_ROOT_OUT)/sbin; \
     ln -sf ../init $(TARGET_ROOT_OUT)/sbin/ueventd; \
     ln -sf ../init $(TARGET_ROOT_OUT)/sbin/watchdogd
 
-LOCAL_CLANG := $(init_clang)
+LOCAL_SANITIZE := signed-integer-overflow
+LOCAL_CLANG := true
 include $(BUILD_EXECUTABLE)
-
-
-
-
-include $(CLEAR_VARS)
-LOCAL_MODULE := init_tests
-LOCAL_SRC_FILES := \
-    init_parser_test.cpp \
-    util_test.cpp \
-
-LOCAL_SHARED_LIBRARIES += \
-    libcutils \
-    libbase \
-
-LOCAL_STATIC_LIBRARIES := libinit
-LOCAL_CLANG := $(init_clang)
-include $(BUILD_NATIVE_TEST)

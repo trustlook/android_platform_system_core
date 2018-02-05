@@ -25,10 +25,12 @@ extern "C" {
 #include <crypto_scrypt.h>
 }
 
-#include <UniquePtr.h>
+#include <android-base/memory.h>
 #include <gatekeeper/gatekeeper.h>
+
 #include <iostream>
 #include <unordered_map>
+#include <memory>
 
 namespace gatekeeper {
 
@@ -150,14 +152,15 @@ public:
     }
 
     bool DoVerify(const password_handle_t *expected_handle, const SizedBuffer &password) {
-        FastHashMap::const_iterator it = fast_hash_map_.find(expected_handle->user_id);
+        uint64_t user_id = android::base::get_unaligned<secure_id_t>(&expected_handle->user_id);
+        FastHashMap::const_iterator it = fast_hash_map_.find(user_id);
         if (it != fast_hash_map_.end() && VerifyFast(it->second, password)) {
             return true;
         } else {
             if (GateKeeper::DoVerify(expected_handle, password)) {
                 uint64_t salt;
                 GetRandom(&salt, sizeof(salt));
-                fast_hash_map_[expected_handle->user_id] = ComputeFastHash(password, salt);
+                fast_hash_map_[user_id] = ComputeFastHash(password, salt);
                 return true;
             }
         }
@@ -170,11 +173,10 @@ private:
     typedef std::unordered_map<uint32_t, failure_record_t> FailureRecordMap;
     typedef std::unordered_map<uint64_t, fast_hash_t> FastHashMap;
 
-    UniquePtr<uint8_t[]> key_;
+    std::unique_ptr<uint8_t[]> key_;
     FailureRecordMap failure_map_;
     FastHashMap fast_hash_map_;
 };
 }
 
 #endif // SOFT_GATEKEEPER_H_
-

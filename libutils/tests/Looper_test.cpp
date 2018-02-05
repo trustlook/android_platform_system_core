@@ -76,7 +76,7 @@ public:
     int fd;
     int events;
 
-    StubCallbackHandler(int nextResult) : nextResult(nextResult),
+    explicit StubCallbackHandler(int nextResult) : nextResult(nextResult),
             callbackCount(0), fd(-1), events(-1) {
     }
 
@@ -138,7 +138,7 @@ TEST_F(LooperTest, PollOnce_WhenNonZeroTimeoutAndAwokenBeforeWaiting_Immediately
 
 TEST_F(LooperTest, PollOnce_WhenNonZeroTimeoutAndAwokenWhileWaiting_PromptlyReturns) {
     sp<DelayedWake> delayedWake = new DelayedWake(100, mLooper);
-    delayedWake->run();
+    delayedWake->run("LooperTest");
 
     StopWatch stopWatch("pollOnce");
     int result = mLooper->pollOnce(1000);
@@ -251,7 +251,7 @@ TEST_F(LooperTest, PollOnce_WhenNonZeroTimeoutAndSignalledFDWhileWaiting_Promptl
     sp<DelayedWriteSignal> delayedWriteSignal = new DelayedWriteSignal(100, & pipe);
 
     handler.setCallback(mLooper, pipe.receiveFd, Looper::EVENT_INPUT);
-    delayedWriteSignal->run();
+    delayedWriteSignal->run("LooperTest");
 
     StopWatch stopWatch("pollOnce");
     int result = mLooper->pollOnce(1000);

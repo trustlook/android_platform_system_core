@@ -16,61 +16,58 @@
 
 #if defined(_WIN32)
 
-#include <log/uio.h>
 #include <unistd.h>
 
-int  readv( int  fd, struct iovec*  vecs, int  count )
-{
-    int   total = 0;
+#include <log/uio.h>
 
-    for ( ; count > 0; count--, vecs++ ) {
-        char*  buf = vecs->iov_base;
-        int    len = vecs->iov_len;
-        
-        while (len > 0) {
-            int  ret = read( fd, buf, len );
-            if (ret < 0) {
-                if (total == 0)
-                    total = -1;
-                goto Exit;
-            }
-            if (ret == 0)
-                goto Exit;
+#include "log_portability.h"
 
-            total += ret;
-            buf   += ret;
-            len   -= ret;
-        }
+LIBLOG_ABI_PUBLIC int readv(int fd, struct iovec* vecs, int count) {
+  int total = 0;
+
+  for (; count > 0; count--, vecs++) {
+    char* buf = vecs->iov_base;
+    int len = vecs->iov_len;
+
+    while (len > 0) {
+      int ret = read(fd, buf, len);
+      if (ret < 0) {
+        if (total == 0) total = -1;
+        goto Exit;
+      }
+      if (ret == 0) goto Exit;
+
+      total += ret;
+      buf += ret;
+      len -= ret;
     }
+  }
 Exit:
-    return total;
+  return total;
 }
 
-int  writev( int  fd, const struct iovec*  vecs, int  count )
-{
-    int   total = 0;
+LIBLOG_ABI_PUBLIC int writev(int fd, const struct iovec* vecs, int count) {
+  int total = 0;
 
-    for ( ; count > 0; count--, vecs++ ) {
-        const char*  buf = vecs->iov_base;
-        int          len = vecs->iov_len;
-        
-        while (len > 0) {
-            int  ret = write( fd, buf, len );
-            if (ret < 0) {
-                if (total == 0)
-                    total = -1;
-                goto Exit;
-            }
-            if (ret == 0)
-                goto Exit;
+  for (; count > 0; count--, vecs++) {
+    const char* buf = vecs->iov_base;
+    int len = vecs->iov_len;
 
-            total += ret;
-            buf   += ret;
-            len   -= ret;
-        }
+    while (len > 0) {
+      int ret = write(fd, buf, len);
+      if (ret < 0) {
+        if (total == 0) total = -1;
+        goto Exit;
+      }
+      if (ret == 0) goto Exit;
+
+      total += ret;
+      buf += ret;
+      len -= ret;
     }
-Exit:    
-    return total;
+  }
+Exit:
+  return total;
 }
 
 #endif

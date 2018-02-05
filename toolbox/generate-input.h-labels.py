@@ -16,8 +16,10 @@
 #
 # pylint: disable=bad-indentation,bad-continuation
 
+from __future__ import print_function
 import os
 import re
+import sys
 
 input_prop_list = []
 ev_list = []
@@ -36,46 +38,47 @@ ff_list = []
 
 r = re.compile(r'#define\s+(\S+)\s+((?:0x)?\d+)')
 
-with open('bionic/libc/kernel/uapi/linux/input.h', 'r') as f:
-  for line in f:
-    m = r.match(line)
-    if m:
-      name = m.group(1)
-      if name.startswith("INPUT_PROP_"):
-        input_prop_list.append(name)
-      elif name.startswith("EV_"):
-        ev_list.append(name)
-      elif name.startswith("SYN_"):
-        syn_list.append(name)
-      elif name.startswith("KEY_") or name.startswith("BTN_"):
-        key_list.append(name)
-      elif name.startswith("REL_"):
-        rel_list.append(name)
-      elif name.startswith("ABS_"):
-        abs_list.append(name)
-      elif name.startswith("SW_"):
-        sw_list.append(name)
-      elif name.startswith("MSC_"):
-        msc_list.append(name)
-      elif name.startswith("LED_"):
-        led_list.append(name)
-      elif name.startswith("REP_"):
-        rep_list.append(name)
-      elif name.startswith("SND_"):
-        snd_list.append(name)
-      elif name.startswith("MT_TOOL_"):
-        mt_tool_list.append(name)
-      elif name.startswith("FF_STATUS_"):
-        ff_status_list.append(name)
-      elif name.startswith("FF_"):
-        ff_list.append(name)
+for arg in sys.argv[1:]:
+  with open(arg, 'r') as f:
+    for line in f:
+      m = r.match(line)
+      if m:
+        name = m.group(1)
+        if name.startswith("INPUT_PROP_"):
+          input_prop_list.append(name)
+        elif name.startswith("EV_"):
+          ev_list.append(name)
+        elif name.startswith("SYN_"):
+          syn_list.append(name)
+        elif name.startswith("KEY_") or name.startswith("BTN_"):
+          key_list.append(name)
+        elif name.startswith("REL_"):
+          rel_list.append(name)
+        elif name.startswith("ABS_"):
+          abs_list.append(name)
+        elif name.startswith("SW_"):
+          sw_list.append(name)
+        elif name.startswith("MSC_"):
+          msc_list.append(name)
+        elif name.startswith("LED_"):
+          led_list.append(name)
+        elif name.startswith("REP_"):
+          rep_list.append(name)
+        elif name.startswith("SND_"):
+          snd_list.append(name)
+        elif name.startswith("MT_TOOL_"):
+          mt_tool_list.append(name)
+        elif name.startswith("FF_STATUS_"):
+          ff_status_list.append(name)
+        elif name.startswith("FF_"):
+          ff_list.append(name)
 
 def Dump(struct_name, values):
-  print 'static struct label %s[] = {' % (struct_name)
+  print('static struct label %s[] = {' % (struct_name))
   for value in values:
-    print '    LABEL(%s),' % (value)
-  print '    LABEL_END,'
-  print '};'
+    print('    LABEL(%s),' % (value))
+  print('    LABEL_END,')
+  print('};')
 
 Dump("input_prop_labels", input_prop_list)
 Dump("ev_labels", ev_list)

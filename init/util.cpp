@@ -14,146 +14,164 @@
  * limitations under the License.
  */
 
-#include <stdarg.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <fcntl.h>
-#include <ctype.h>
-#include <errno.h>
-#include <time.h>
-#include <ftw.h>
-
-#include <selinux/label.h>
-#include <selinux/android.h>
-
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-
-#include <base/file.h>
-
-/* for ANDROID_SOCKET_* */
-#include <cutils/sockets.h>
-#include <base/stringprintf.h>
-
-#include <private/android_filesystem_config.h>
-
-#include "init.h"
-#include "log.h"
 #include "util.h"
 
-/*
- * android_name_to_id - returns the integer uid/gid associated with the given
- * name, or -1U on error.
- */
-static unsigned int android_name_to_id(const char *name)
-{
-    const struct android_id_info *info = android_ids;
-    unsigned int n;
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <pwd.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
 
-    for (n = 0; n < android_id_count; n++) {
-        if (!strcmp(info[n].name, name))
-            return info[n].aid;
+#include <thread>
+
+#include <android-base/file.h>
+#include <android-base/logging.h>
+#include <android-base/properties.h>
+#include <android-base/stringprintf.h>
+#include <android-base/strings.h>
+#include <android-base/unique_fd.h>
+#include <cutils/android_reboot.h>
+#include <cutils/sockets.h>
+#include <selinux/android.h>
+
+#include "reboot.h"
+
+#ifdef _INIT_INIT_H
+#error "Do not include init.h in files used by ueventd or watchdogd; it will expose init's globals"
+#endif
+
+using android::base::boot_clock;
+using namespace std::literals::string_literals;
+
+namespace android {
+namespace init {
+
+const std::string kDefaultAndroidDtDir("/proc/device-tree/firmware/android/");
+
+// DecodeUid() - decodes and returns the given string, which can be either the
+// numeric or name representation, into the integer uid or gid. Returns
+// UINT_MAX on error.
+bool DecodeUid(const std::string& name, uid_t* uid, std::string* err) {
+    *uid = UINT_MAX;
+    *err = "";
+
+    if (isalpha(name[0])) {
+        passwd* pwd = getpwnam(name.c_str());
+        if (!pwd) {
+            *err = "getpwnam failed: "s + strerror(errno);
+            return false;
+        }
+        *uid = pwd->pw_uid;
+        return true;
     }
 
-    return -1U;
-}
-
-/*
- * decode_uid - decodes and returns the given string, which can be either the
- * numeric or name representation, into the integer uid or gid. Returns -1U on
- * error.
- */
-unsigned int decode_uid(const char *s)
-{
-    unsigned int v;
-
-    if (!s || *s == '\0')
-        return -1U;
-    if (isalpha(s[0]))
-        return android_name_to_id(s);
-
     errno = 0;
-    v = (unsigned int) strtoul(s, 0, 0);
-    if (errno)
-        return -1U;
-    return v;
+    uid_t result = static_cast<uid_t>(strtoul(name.c_str(), 0, 0));
+    if (errno) {
+        *err = "strtoul failed: "s + strerror(errno);
+        return false;
+    }
+    *uid = result;
+    return true;
 }
 
 /*
- * create_socket - creates a Unix domain socket in ANDROID_SOCKET_DIR
+ * CreateSocket - creates a Unix domain socket in ANDROID_SOCKET_DIR
  * ("/dev/socket") as dictated in init.rc. This socket is inherited by the
  * daemon. We communicate the file descriptor's value via the environment
  * variable ANDROID_SOCKET_ENV_PREFIX<name> ("ANDROID_SOCKET_foo").
  */
-int create_socket(const char *name, int type, mode_t perm, uid_t uid,
-                  gid_t gid, const char *socketcon)
-{
-    struct sockaddr_un addr;
-    int fd, ret;
-    char *filecon;
+int CreateSocket(const char* name, int type, bool passcred, mode_t perm, uid_t uid, gid_t gid,
+                 const char* socketcon, selabel_handle* sehandle) {
+    if (socketcon) {
+        if (setsockcreatecon(socketcon) == -1) {
+            PLOG(ERROR) << "setsockcreatecon(\"" << socketcon << "\") failed";
+            return -1;
+        }
+    }
 
-    if (socketcon)
-        setsockcreatecon(socketcon);
-
-    fd = socket(PF_UNIX, type, 0);
+    android::base::unique_fd fd(socket(PF_UNIX, type, 0));
     if (fd < 0) {
-        ERROR("Failed to open socket '%s': %s\n", name, strerror(errno));
+        PLOG(ERROR) << "Failed to open socket '" << name << "'";
         return -1;
     }
 
-    if (socketcon)
-        setsockcreatecon(NULL);
+    if (socketcon) setsockcreatecon(NULL);
 
+    struct sockaddr_un addr;
     memset(&addr, 0 , sizeof(addr));
     addr.sun_family = AF_UNIX;
     snprintf(addr.sun_path, sizeof(addr.sun_path), ANDROID_SOCKET_DIR"/%s",
              name);
 
-    ret = unlink(addr.sun_path);
-    if (ret != 0 && errno != ENOENT) {
-        ERROR("Failed to unlink old socket '%s': %s\n", name, strerror(errno));
-        goto out_close;
+    if ((unlink(addr.sun_path) != 0) && (errno != ENOENT)) {
+        PLOG(ERROR) << "Failed to unlink old socket '" << name << "'";
+        return -1;
     }
 
-    filecon = NULL;
+    char *filecon = NULL;
     if (sehandle) {
-        ret = selabel_lookup(sehandle, &filecon, addr.sun_path, S_IFSOCK);
-        if (ret == 0)
+        if (selabel_lookup(sehandle, &filecon, addr.sun_path, S_IFSOCK) == 0) {
             setfscreatecon(filecon);
+        }
     }
 
-    ret = bind(fd, (struct sockaddr *) &addr, sizeof (addr));
-    if (ret) {
-        ERROR("Failed to bind socket '%s': %s\n", name, strerror(errno));
-        goto out_unlink;
+    if (passcred) {
+        int on = 1;
+        if (setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on))) {
+            PLOG(ERROR) << "Failed to set SO_PASSCRED '" << name << "'";
+            return -1;
+        }
     }
+
+    int ret = bind(fd, (struct sockaddr *) &addr, sizeof (addr));
+    int savederrno = errno;
 
     setfscreatecon(NULL);
     freecon(filecon);
 
-    chown(addr.sun_path, uid, gid);
-    chmod(addr.sun_path, perm);
+    if (ret) {
+        errno = savederrno;
+        PLOG(ERROR) << "Failed to bind socket '" << name << "'";
+        goto out_unlink;
+    }
 
-    INFO("Created socket '%s' with mode '%o', user '%d', group '%d'\n",
-         addr.sun_path, perm, uid, gid);
+    if (lchown(addr.sun_path, uid, gid)) {
+        PLOG(ERROR) << "Failed to lchown socket '" << addr.sun_path << "'";
+        goto out_unlink;
+    }
+    if (fchmodat(AT_FDCWD, addr.sun_path, perm, AT_SYMLINK_NOFOLLOW)) {
+        PLOG(ERROR) << "Failed to fchmodat socket '" << addr.sun_path << "'";
+        goto out_unlink;
+    }
 
-    return fd;
+    LOG(INFO) << "Created socket '" << addr.sun_path << "'"
+              << ", mode " << std::oct << perm << std::dec
+              << ", user " << uid
+              << ", group " << gid;
+
+    return fd.release();
 
 out_unlink:
     unlink(addr.sun_path);
-out_close:
-    close(fd);
     return -1;
 }
 
-bool read_file(const char* path, std::string* content) {
+bool ReadFile(const std::string& path, std::string* content, std::string* err) {
     content->clear();
+    *err = "";
 
-    int fd = TEMP_FAILURE_RETRY(open(path, O_RDONLY|O_NOFOLLOW|O_CLOEXEC));
+    android::base::unique_fd fd(
+        TEMP_FAILURE_RETRY(open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC)));
     if (fd == -1) {
+        *err = "Unable to open '" + path + "': " + strerror(errno);
         return false;
     }
 
@@ -161,277 +179,77 @@ bool read_file(const char* path, std::string* content) {
     // or group-writable files.
     struct stat sb;
     if (fstat(fd, &sb) == -1) {
-        ERROR("fstat failed for '%s': %s\n", path, strerror(errno));
+        *err = "fstat failed for '" + path + "': " + strerror(errno);
         return false;
     }
     if ((sb.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-        ERROR("skipping insecure file '%s'\n", path);
+        *err = "Skipping insecure file '" + path + "'";
         return false;
     }
 
-    bool okay = android::base::ReadFdToString(fd, content);
-    close(fd);
-    return okay;
+    if (!android::base::ReadFdToString(fd, content)) {
+        *err = "Unable to read '" + path + "': " + strerror(errno);
+        return false;
+    }
+    return true;
 }
 
-int write_file(const char* path, const char* content) {
-    int fd = TEMP_FAILURE_RETRY(open(path, O_WRONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC, 0600));
+bool WriteFile(const std::string& path, const std::string& content, std::string* err) {
+    *err = "";
+
+    android::base::unique_fd fd(TEMP_FAILURE_RETRY(
+        open(path.c_str(), O_WRONLY | O_CREAT | O_NOFOLLOW | O_TRUNC | O_CLOEXEC, 0600)));
     if (fd == -1) {
-        NOTICE("write_file: Unable to open '%s': %s\n", path, strerror(errno));
-        return -1;
+        *err = "Unable to open '" + path + "': " + strerror(errno);
+        return false;
     }
-    int result = android::base::WriteStringToFd(content, fd) ? 0 : -1;
-    if (result == -1) {
-        NOTICE("write_file: Unable to write to '%s': %s\n", path, strerror(errno));
+    if (!android::base::WriteStringToFd(content, fd)) {
+        *err = "Unable to write to '" + path + "': " + strerror(errno);
+        return false;
     }
-    close(fd);
-    return result;
+    return true;
 }
 
-#define MAX_MTD_PARTITIONS 16
-
-static struct {
-    char name[16];
-    int number;
-} mtd_part_map[MAX_MTD_PARTITIONS];
-
-static int mtd_part_count = -1;
-
-static void find_mtd_partitions(void)
-{
-    int fd;
-    char buf[1024];
-    char *pmtdbufp;
-    ssize_t pmtdsize;
-    int r;
-
-    fd = open("/proc/mtd", O_RDONLY|O_CLOEXEC);
-    if (fd < 0)
-        return;
-
-    buf[sizeof(buf) - 1] = '\0';
-    pmtdsize = read(fd, buf, sizeof(buf) - 1);
-    pmtdbufp = buf;
-    while (pmtdsize > 0) {
-        int mtdnum, mtdsize, mtderasesize;
-        char mtdname[16];
-        mtdname[0] = '\0';
-        mtdnum = -1;
-        r = sscanf(pmtdbufp, "mtd%d: %x %x %15s",
-                   &mtdnum, &mtdsize, &mtderasesize, mtdname);
-        if ((r == 4) && (mtdname[0] == '"')) {
-            char *x = strchr(mtdname + 1, '"');
-            if (x) {
-                *x = 0;
-            }
-            INFO("mtd partition %d, %s\n", mtdnum, mtdname + 1);
-            if (mtd_part_count < MAX_MTD_PARTITIONS) {
-                strcpy(mtd_part_map[mtd_part_count].name, mtdname + 1);
-                mtd_part_map[mtd_part_count].number = mtdnum;
-                mtd_part_count++;
-            } else {
-                ERROR("too many mtd partitions\n");
-            }
-        }
-        while (pmtdsize > 0 && *pmtdbufp != '\n') {
-            pmtdbufp++;
-            pmtdsize--;
-        }
-        if (pmtdsize > 0) {
-            pmtdbufp++;
-            pmtdsize--;
+int mkdir_recursive(const std::string& path, mode_t mode, selabel_handle* sehandle) {
+    std::string::size_type slash = 0;
+    while ((slash = path.find('/', slash + 1)) != std::string::npos) {
+        auto directory = path.substr(0, slash);
+        struct stat info;
+        if (stat(directory.c_str(), &info) != 0) {
+            auto ret = make_dir(directory.c_str(), mode, sehandle);
+            if (ret && errno != EEXIST) return ret;
         }
     }
-    close(fd);
+    auto ret = make_dir(path.c_str(), mode, sehandle);
+    if (ret && errno != EEXIST) return ret;
+    return 0;
 }
 
-int mtd_name_to_number(const char *name)
-{
-    int n;
-    if (mtd_part_count < 0) {
-        mtd_part_count = 0;
-        find_mtd_partitions();
-    }
-    for (n = 0; n < mtd_part_count; n++) {
-        if (!strcmp(name, mtd_part_map[n].name)) {
-            return mtd_part_map[n].number;
-        }
+int wait_for_file(const char* filename, std::chrono::nanoseconds timeout) {
+    boot_clock::time_point timeout_time = boot_clock::now() + timeout;
+    while (boot_clock::now() < timeout_time) {
+        struct stat sb;
+        if (stat(filename, &sb) != -1) return 0;
+
+        std::this_thread::sleep_for(10ms);
     }
     return -1;
 }
 
-time_t gettime() {
-    timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return now.tv_sec;
-}
+void import_kernel_cmdline(bool in_qemu,
+                           const std::function<void(const std::string&, const std::string&, bool)>& fn) {
+    std::string cmdline;
+    android::base::ReadFileToString("/proc/cmdline", &cmdline);
 
-uint64_t gettime_ns() {
-    timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return static_cast<uint64_t>(now.tv_sec) * UINT64_C(1000000000) + now.tv_nsec;
-}
-
-int mkdir_recursive(const char *pathname, mode_t mode)
-{
-    char buf[128];
-    const char *slash;
-    const char *p = pathname;
-    int width;
-    int ret;
-    struct stat info;
-
-    while ((slash = strchr(p, '/')) != NULL) {
-        width = slash - pathname;
-        p = slash + 1;
-        if (width < 0)
-            break;
-        if (width == 0)
-            continue;
-        if ((unsigned int)width > sizeof(buf) - 1) {
-            ERROR("path too long for mkdir_recursive\n");
-            return -1;
-        }
-        memcpy(buf, pathname, width);
-        buf[width] = 0;
-        if (stat(buf, &info) != 0) {
-            ret = make_dir(buf, mode);
-            if (ret && errno != EEXIST)
-                return ret;
+    for (const auto& entry : android::base::Split(android::base::Trim(cmdline), " ")) {
+        std::vector<std::string> pieces = android::base::Split(entry, "=");
+        if (pieces.size() == 2) {
+            fn(pieces[0], pieces[1], in_qemu);
         }
     }
-    ret = make_dir(pathname, mode);
-    if (ret && errno != EEXIST)
-        return ret;
-    return 0;
 }
 
-/*
- * replaces any unacceptable characters with '_', the
- * length of the resulting string is equal to the input string
- */
-void sanitize(char *s)
-{
-    const char* accept =
-            "abcdefghijklmnopqrstuvwxyz"
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            "0123456789"
-            "_-.";
-
-    if (!s)
-        return;
-
-    while (*s) {
-        s += strspn(s, accept);
-        if (*s) *s++ = '_';
-    }
-}
-
-void make_link_init(const char *oldpath, const char *newpath)
-{
-    int ret;
-    char buf[256];
-    char *slash;
-    int width;
-
-    slash = strrchr(newpath, '/');
-    if (!slash)
-        return;
-    width = slash - newpath;
-    if (width <= 0 || width > (int)sizeof(buf) - 1)
-        return;
-    memcpy(buf, newpath, width);
-    buf[width] = 0;
-    ret = mkdir_recursive(buf, 0755);
-    if (ret)
-        ERROR("Failed to create directory %s: %s (%d)\n", buf, strerror(errno), errno);
-
-    ret = symlink(oldpath, newpath);
-    if (ret && errno != EEXIST)
-        ERROR("Failed to symlink %s to %s: %s (%d)\n", oldpath, newpath, strerror(errno), errno);
-}
-
-void remove_link(const char *oldpath, const char *newpath)
-{
-    char path[256];
-    ssize_t ret;
-    ret = readlink(newpath, path, sizeof(path) - 1);
-    if (ret <= 0)
-        return;
-    path[ret] = 0;
-    if (!strcmp(path, oldpath))
-        unlink(newpath);
-}
-
-int wait_for_file(const char *filename, int timeout)
-{
-    struct stat info;
-    uint64_t timeout_time_ns = gettime_ns() + timeout * UINT64_C(1000000000);
-    int ret = -1;
-
-    while (gettime_ns() < timeout_time_ns && ((ret = stat(filename, &info)) < 0))
-        usleep(10000);
-
-    return ret;
-}
-
-void open_devnull_stdio(void)
-{
-    // Try to avoid the mknod() call if we can. Since SELinux makes
-    // a /dev/null replacement available for free, let's use it.
-    int fd = open("/sys/fs/selinux/null", O_RDWR);
-    if (fd == -1) {
-        // OOPS, /sys/fs/selinux/null isn't available, likely because
-        // /sys/fs/selinux isn't mounted. Fall back to mknod.
-        static const char *name = "/dev/__null__";
-        if (mknod(name, S_IFCHR | 0600, (1 << 8) | 3) == 0) {
-            fd = open(name, O_RDWR);
-            unlink(name);
-        }
-        if (fd == -1) {
-            exit(1);
-        }
-    }
-
-    dup2(fd, 0);
-    dup2(fd, 1);
-    dup2(fd, 2);
-    if (fd > 2) {
-        close(fd);
-    }
-}
-
-void import_kernel_cmdline(bool in_qemu, std::function<void(char*,bool)> import_kernel_nv)
-{
-    char cmdline[2048];
-    char *ptr;
-    int fd;
-
-    fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
-    if (fd >= 0) {
-        int n = read(fd, cmdline, sizeof(cmdline) - 1);
-        if (n < 0) n = 0;
-
-        /* get rid of trailing newline, it happens */
-        if (n > 0 && cmdline[n-1] == '\n') n--;
-
-        cmdline[n] = 0;
-        close(fd);
-    } else {
-        cmdline[0] = 0;
-    }
-
-    ptr = cmdline;
-    while (ptr && *ptr) {
-        char *x = strchr(ptr, ' ');
-        if (x != 0) *x++ = 0;
-        import_kernel_nv(ptr, in_qemu);
-        ptr = x;
-    }
-}
-
-int make_dir(const char *path, mode_t mode)
-{
+int make_dir(const char* path, mode_t mode, selabel_handle* sehandle) {
     int rc;
 
     char *secontext = NULL;
@@ -453,16 +271,6 @@ int make_dir(const char *path, mode_t mode)
     return rc;
 }
 
-int restorecon(const char* pathname)
-{
-    return selinux_android_restorecon(pathname, 0);
-}
-
-int restorecon_recursive(const char* pathname)
-{
-    return selinux_android_restorecon(pathname, SELINUX_ANDROID_RESTORECON_RECURSE);
-}
-
 /*
  * Writes hex_len hex characters (1/2 byte) to hex from bytes.
  */
@@ -472,3 +280,145 @@ std::string bytes_to_hex(const uint8_t* bytes, size_t bytes_len) {
         android::base::StringAppendF(&hex, "%02x", bytes[i]);
     return hex;
 }
+
+/*
+ * Returns true is pathname is a directory
+ */
+bool is_dir(const char* pathname) {
+    struct stat info;
+    if (stat(pathname, &info) == -1) {
+        return false;
+    }
+    return S_ISDIR(info.st_mode);
+}
+
+bool expand_props(const std::string& src, std::string* dst) {
+    const char* src_ptr = src.c_str();
+
+    if (!dst) {
+        return false;
+    }
+
+    /* - variables can either be $x.y or ${x.y}, in case they are only part
+     *   of the string.
+     * - will accept $$ as a literal $.
+     * - no nested property expansion, i.e. ${foo.${bar}} is not supported,
+     *   bad things will happen
+     * - ${x.y:-default} will return default value if property empty.
+     */
+    while (*src_ptr) {
+        const char* c;
+
+        c = strchr(src_ptr, '$');
+        if (!c) {
+            dst->append(src_ptr);
+            return true;
+        }
+
+        dst->append(src_ptr, c);
+        c++;
+
+        if (*c == '$') {
+            dst->push_back(*(c++));
+            src_ptr = c;
+            continue;
+        } else if (*c == '\0') {
+            return true;
+        }
+
+        std::string prop_name;
+        std::string def_val;
+        if (*c == '{') {
+            c++;
+            const char* end = strchr(c, '}');
+            if (!end) {
+                // failed to find closing brace, abort.
+                LOG(ERROR) << "unexpected end of string in '" << src << "', looking for }";
+                return false;
+            }
+            prop_name = std::string(c, end);
+            c = end + 1;
+            size_t def = prop_name.find(":-");
+            if (def < prop_name.size()) {
+                def_val = prop_name.substr(def + 2);
+                prop_name = prop_name.substr(0, def);
+            }
+        } else {
+            prop_name = c;
+            LOG(ERROR) << "using deprecated syntax for specifying property '" << c << "', use ${name} instead";
+            c += prop_name.size();
+        }
+
+        if (prop_name.empty()) {
+            LOG(ERROR) << "invalid zero-length property name in '" << src << "'";
+            return false;
+        }
+
+        std::string prop_val = android::base::GetProperty(prop_name, "");
+        if (prop_val.empty()) {
+            if (def_val.empty()) {
+                LOG(ERROR) << "property '" << prop_name << "' doesn't exist while expanding '" << src << "'";
+                return false;
+            }
+            prop_val = def_val;
+        }
+
+        dst->append(prop_val);
+        src_ptr = c;
+    }
+
+    return true;
+}
+
+void panic() {
+    LOG(ERROR) << "panic: rebooting to bootloader";
+    // Do not queue "shutdown" trigger since we want to shutdown immediately
+    DoReboot(ANDROID_RB_RESTART2, "reboot", "bootloader", false);
+}
+
+static std::string init_android_dt_dir() {
+    // Use the standard procfs-based path by default
+    std::string android_dt_dir = kDefaultAndroidDtDir;
+    // The platform may specify a custom Android DT path in kernel cmdline
+    import_kernel_cmdline(false,
+                          [&](const std::string& key, const std::string& value, bool in_qemu) {
+                              if (key == "androidboot.android_dt_dir") {
+                                  android_dt_dir = value;
+                              }
+                          });
+    LOG(INFO) << "Using Android DT directory " << android_dt_dir;
+    return android_dt_dir;
+}
+
+// FIXME: The same logic is duplicated in system/core/fs_mgr/
+const std::string& get_android_dt_dir() {
+    // Set once and saves time for subsequent calls to this function
+    static const std::string kAndroidDtDir = init_android_dt_dir();
+    return kAndroidDtDir;
+}
+
+// Reads the content of device tree file under the platform's Android DT directory.
+// Returns true if the read is success, false otherwise.
+bool read_android_dt_file(const std::string& sub_path, std::string* dt_content) {
+    const std::string file_name = get_android_dt_dir() + sub_path;
+    if (android::base::ReadFileToString(file_name, dt_content)) {
+        if (!dt_content->empty()) {
+            dt_content->pop_back();  // Trims the trailing '\0' out.
+            return true;
+        }
+    }
+    return false;
+}
+
+bool is_android_dt_value_expected(const std::string& sub_path, const std::string& expected_content) {
+    std::string dt_content;
+    if (read_android_dt_file(sub_path, &dt_content)) {
+        if (dt_content == expected_content) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace init
+}  // namespace android

@@ -17,13 +17,16 @@
 #ifndef _INIT_LOG_H_
 #define _INIT_LOG_H_
 
-#include <cutils/klog.h>
+#include <sys/cdefs.h>
 
-#define ERROR(x...)   init_klog_write(KLOG_ERROR_LEVEL, x)
-#define NOTICE(x...)  init_klog_write(KLOG_NOTICE_LEVEL, x)
-#define INFO(x...)    init_klog_write(KLOG_INFO_LEVEL, x)
+namespace android {
+namespace init {
 
-void init_klog_write(int level, const char* fmt, ...) __printflike(2, 3);
+void InitKernelLogging(char* argv[]);
+
 int selinux_klog_callback(int level, const char* fmt, ...) __printflike(2, 3);
+
+}  // namespace init
+}  // namespace android
 
 #endif

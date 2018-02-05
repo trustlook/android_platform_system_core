@@ -2,16 +2,16 @@
 **
 ** Copyright 2006, The Android Open Source Project
 **
-** Licensed under the Apache License, Version 2.0 (the "License"); 
-** you may not use this file except in compliance with the License. 
-** You may obtain a copy of the License at 
+** Licensed under the Apache License, Version 2.0 (the "License");
+** you may not use this file except in compliance with the License.
+** You may obtain a copy of the License at
 **
-**     http://www.apache.org/licenses/LICENSE-2.0 
+**     http://www.apache.org/licenses/LICENSE-2.0
 **
-** Unless required by applicable law or agreed to in writing, software 
-** distributed under the License is distributed on an "AS IS" BASIS, 
-** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-** See the License for the specific language governing permissions and 
+** Unless required by applicable law or agreed to in writing, software
+** distributed under the License is distributed on an "AS IS" BASIS,
+** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+** See the License for the specific language governing permissions and
 ** limitations under the License.
 */
 
@@ -19,10 +19,11 @@
 
 #include <assert.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/types.h>
-#include <cutils/log.h>
+
+#include <log/log.h>
 
 #include "GGLAssembler.h"
 
@@ -893,7 +894,8 @@ void GGLAssembler::build_and_immediate(int d, int s, uint32_t mask, int bits)
         return;
     }
     
-    if (getCodegenArch() == CODEGEN_ARCH_MIPS) {
+    if ((getCodegenArch() == CODEGEN_ARCH_MIPS) ||
+        (getCodegenArch() == CODEGEN_ARCH_MIPS64)) {
         // MIPS can do 16-bit imm in 1 instr, 32-bit in 3 instr
         // the below ' while (mask)' code is buggy on mips
         // since mips returns true on isValidImmediate()
@@ -1057,7 +1059,8 @@ RegisterAllocator::RegisterFile& RegisterAllocator::registerFile()
 RegisterAllocator::RegisterFile::RegisterFile(int codegen_arch)
     : mRegs(0), mTouched(0), mStatus(0), mArch(codegen_arch), mRegisterOffset(0)
 {
-    if (mArch == ARMAssemblerInterface::CODEGEN_ARCH_MIPS) {
+    if ((mArch == ARMAssemblerInterface::CODEGEN_ARCH_MIPS) ||
+        (mArch == ARMAssemblerInterface::CODEGEN_ARCH_MIPS64)) {
         mRegisterOffset = 2;    // ARM has regs 0..15, MIPS offset to 2..17
     }
     reserve(ARMAssemblerInterface::SP);
@@ -1067,7 +1070,8 @@ RegisterAllocator::RegisterFile::RegisterFile(int codegen_arch)
 RegisterAllocator::RegisterFile::RegisterFile(const RegisterFile& rhs, int codegen_arch)
     : mRegs(rhs.mRegs), mTouched(rhs.mTouched), mArch(codegen_arch), mRegisterOffset(0)
 {
-    if (mArch == ARMAssemblerInterface::CODEGEN_ARCH_MIPS) {
+    if ((mArch == ARMAssemblerInterface::CODEGEN_ARCH_MIPS) ||
+        (mArch == ARMAssemblerInterface::CODEGEN_ARCH_MIPS64)) {
         mRegisterOffset = 2;    // ARM has regs 0..15, MIPS offset to 2..17
     }
 }

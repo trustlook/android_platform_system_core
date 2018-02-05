@@ -27,16 +27,15 @@ test_tags := tests
 # Unit tests.
 # -----------------------------------------------------------------------------
 
+event_flag := -DAUDITD_LOG_TAG=1003 -DCHATTY_LOG_TAG=1004
+
 test_c_flags := \
     -fstack-protector-all \
     -g \
     -Wall -Wextra \
     -Werror \
     -fno-builtin \
-
-ifneq ($(TARGET_USES_LOGD),false)
-test_c_flags += -DTARGET_USES_LOGD=1
-endif
+    $(event_flag)
 
 test_src_files := \
     logd_test.cpp
@@ -47,6 +46,41 @@ include $(CLEAR_VARS)
 LOCAL_MODULE := $(test_module_prefix)unit-tests
 LOCAL_MODULE_TAGS := $(test_tags)
 LOCAL_CFLAGS += $(test_c_flags)
-LOCAL_SHARED_LIBRARIES := libcutils
+LOCAL_SHARED_LIBRARIES := libbase libcutils liblog libselinux
 LOCAL_SRC_FILES := $(test_src_files)
 include $(BUILD_NATIVE_TEST)
+
+cts_executable := CtsLogdTestCases
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := $(cts_executable)
+LOCAL_MODULE_TAGS := tests
+LOCAL_CFLAGS += $(test_c_flags)
+LOCAL_SRC_FILES := $(test_src_files)
+LOCAL_MODULE_PATH := $(TARGET_OUT_DATA)/nativetest
+LOCAL_MULTILIB := both
+LOCAL_MODULE_STEM_32 := $(LOCAL_MODULE)32
+LOCAL_MODULE_STEM_64 := $(LOCAL_MODULE)64
+LOCAL_SHARED_LIBRARIES := libbase libcutils liblog libselinux
+LOCAL_STATIC_LIBRARIES := libgtest libgtest_main
+LOCAL_COMPATIBILITY_SUITE := cts vts
+LOCAL_CTS_TEST_PACKAGE := android.core.logd
+include $(BUILD_CTS_EXECUTABLE)
+
+ifeq ($(HOST_OS)-$(HOST_ARCH),$(filter $(HOST_OS)-$(HOST_ARCH),linux-x86 linux-x86_64))
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := $(cts_executable)_list
+LOCAL_MODULE_TAGS := optional
+LOCAL_CFLAGS := $(test_c_flags) -DHOST
+LOCAL_C_INCLUDES := external/gtest/include
+LOCAL_SRC_FILES := $(test_src_files)
+LOCAL_MULTILIB := both
+LOCAL_MODULE_STEM_32 := $(LOCAL_MODULE)
+LOCAL_MODULE_STEM_64 := $(LOCAL_MODULE)64
+LOCAL_CXX_STL := libc++
+LOCAL_SHARED_LIBRARIES := libbase libcutils liblog
+LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
+include $(BUILD_HOST_NATIVE_TEST)
+
+endif  # ifeq ($(HOST_OS)-$(HOST_ARCH),$(filter $(HOST_OS)-$(HOST_ARCH),linux-x86 linux-x86_64))

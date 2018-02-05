@@ -16,21 +16,26 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/watchdog.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include <linux/watchdog.h>
+#include <android-base/logging.h>
 
 #include "log.h"
-#include "util.h"
+
+#ifdef _INIT_INIT_H
+#error "Do not include init.h in files used by ueventd or watchdogd; it will expose init's globals"
+#endif
 
 #define DEV_NAME "/dev/watchdog"
 
+namespace android {
+namespace init {
+
 int watchdogd_main(int argc, char **argv) {
-    open_devnull_stdio();
-    klog_init();
-    klog_set_level(KLOG_NOTICE_LEVEL);
+    InitKernelLogging(argv);
 
     int interval = 10;
     if (argc >= 2) interval = atoi(argv[1]);
@@ -38,29 +43,31 @@ int watchdogd_main(int argc, char **argv) {
     int margin = 10;
     if (argc >= 3) margin = atoi(argv[2]);
 
-    NOTICE("watchdogd started (interval %d, margin %d)!\n", interval, margin);
+    LOG(INFO) << "watchdogd started (interval " << interval << ", margin " << margin << ")!";
 
     int fd = open(DEV_NAME, O_RDWR|O_CLOEXEC);
     if (fd == -1) {
-        ERROR("watchdogd: Failed to open %s: %s\n", DEV_NAME, strerror(errno));
+        PLOG(ERROR) << "Failed to open " << DEV_NAME;
         return 1;
     }
 
     int timeout = interval + margin;
     int ret = ioctl(fd, WDIOC_SETTIMEOUT, &timeout);
     if (ret) {
-        ERROR("watchdogd: Failed to set timeout to %d: %s\n", timeout, strerror(errno));
+        PLOG(ERROR) << "Failed to set timeout to " << timeout;
         ret = ioctl(fd, WDIOC_GETTIMEOUT, &timeout);
         if (ret) {
-            ERROR("watchdogd: Failed to get timeout: %s\n", strerror(errno));
+            PLOG(ERROR) << "Failed to get timeout";
         } else {
             if (timeout > margin) {
                 interval = timeout - margin;
             } else {
                 interval = 1;
             }
-            ERROR("watchdogd: Adjusted interval to timeout returned by driver: timeout %d, interval %d, margin %d\n",
-                  timeout, interval, margin);
+            LOG(WARNING) << "Adjusted interval to timeout returned by driver: "
+                         << "timeout " << timeout
+                         << ", interval " << interval
+                         << ", margin " << margin;
         }
     }
 
@@ -69,3 +76,6 @@ int watchdogd_main(int argc, char **argv) {
         sleep(interval);
     }
 }
+
+}  // namespace init
+}  // namespace android

@@ -2,33 +2,28 @@
 **
 ** Copyright 2006-2011, The Android Open Source Project
 **
-** Licensed under the Apache License, Version 2.0 (the "License"); 
-** you may not use this file except in compliance with the License. 
-** You may obtain a copy of the License at 
+** Licensed under the Apache License, Version 2.0 (the "License");
+** you may not use this file except in compliance with the License.
+** You may obtain a copy of the License at
 **
-**     http://www.apache.org/licenses/LICENSE-2.0 
+**     http://www.apache.org/licenses/LICENSE-2.0
 **
-** Unless required by applicable law or agreed to in writing, software 
-** distributed under the License is distributed on an "AS IS" BASIS, 
-** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-** See the License for the specific language governing permissions and 
+** Unless required by applicable law or agreed to in writing, software
+** distributed under the License is distributed on an "AS IS" BASIS,
+** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+** See the License for the specific language governing permissions and
 ** limitations under the License.
 */
-
 
 #define LOG_TAG "pixelflinger"
 
 #include <assert.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <cutils/memory.h>
-#include <cutils/log.h>
-
-#ifdef __arm__
-#include <machine/cpu-features.h>
-#endif
+#include <log/log.h>
 
 #include "buffer.h"
 #include "scanline.h"
@@ -41,6 +36,8 @@
 #include "codeflinger/Arm64Assembler.h"
 #elif defined(__mips__) && !defined(__LP64__) && __mips_isa_rev < 6
 #include "codeflinger/MIPSAssembler.h"
+#elif defined(__mips__) && defined(__LP64__)
+#include "codeflinger/MIPS64Assembler.h"
 #endif
 //#include "codeflinger/ARMAssemblerOptimizer.h"
 
@@ -59,7 +56,7 @@
 #   define ANDROID_CODEGEN      ANDROID_CODEGEN_GENERATED
 #endif
 
-#if defined(__arm__) || (defined(__mips__) && !defined(__LP64__) && __mips_isa_rev < 6) || defined(__aarch64__)
+#if defined(__arm__) || (defined(__mips__) && ((!defined(__LP64__) && __mips_isa_rev < 6) || defined(__LP64__))) || defined(__aarch64__)
 #   define ANDROID_ARM_CODEGEN  1
 #else
 #   define ANDROID_ARM_CODEGEN  0
@@ -73,7 +70,7 @@
  */
 #define DEBUG_NEEDS  0
 
-#if defined( __mips__) && !defined(__LP64__) && __mips_isa_rev < 6
+#if defined( __mips__) && ((!defined(__LP64__) && __mips_isa_rev < 6) || defined(__LP64__))
 #define ASSEMBLY_SCRATCH_SIZE   4096
 #elif defined(__aarch64__)
 #define ASSEMBLY_SCRATCH_SIZE   8192
@@ -136,6 +133,9 @@ extern "C" void scanline_t32cb16blend_arm64(uint16_t*, uint32_t*, size_t);
 extern "C" void scanline_col32cb16blend_arm64(uint16_t *dst, uint32_t col, size_t ct);
 #elif defined(__mips__) && !defined(__LP64__) && __mips_isa_rev < 6
 extern "C" void scanline_t32cb16blend_mips(uint16_t*, uint32_t*, size_t);
+#elif defined(__mips__) && defined(__LP64__)
+extern "C" void scanline_t32cb16blend_mips64(uint16_t*, uint32_t*, size_t);
+extern "C" void scanline_col32cb16blend_mips64(uint16_t *dst, uint32_t col, size_t ct);
 #endif
 
 // ----------------------------------------------------------------------------
@@ -286,7 +286,7 @@ static  const needs_filter_t fill16noblend = {
 
 #if ANDROID_ARM_CODEGEN
 
-#if defined(__mips__) && !defined(__LP64__) && __mips_isa_rev < 6
+#if defined(__mips__) && ((!defined(__LP64__) && __mips_isa_rev < 6) || defined(__LP64__))
 static CodeCache gCodeCache(32 * 1024);
 #elif defined(__aarch64__)
 static CodeCache gCodeCache(48 * 1024);
@@ -406,8 +406,10 @@ static void pick_scanline(context_t* c)
         //GGLAssembler assembler(
         //        new ARMAssemblerOptimizer(new ARMAssembler(a)) );
 #endif
-#if defined(__mips__)
+#if defined(__mips__) && !defined(__LP64__) && __mips_isa_rev < 6
         GGLAssembler assembler( new ArmToMipsAssembler(a) );
+#elif defined(__mips__) && defined(__LP64__)
+        GGLAssembler assembler( new ArmToMips64Assembler(a) );
 #elif defined(__aarch64__)
         GGLAssembler assembler( new ArmToArm64Assembler(a) );
 #endif
@@ -958,7 +960,7 @@ discard:
  * Use only for one-to-one texture mapping.
  */
 struct horz_iterator32 {
-    horz_iterator32(context_t* c) {
+    explicit horz_iterator32(context_t* c) {
         const int x = c->iterators.xl;
         const int y = c->iterators.y;
         texture_t& tx = c->state.texture[0];
@@ -975,7 +977,7 @@ protected:
 
 /* A variant for 16-bit source textures. */
 struct horz_iterator16 {
-    horz_iterator16(context_t* c) {
+    explicit horz_iterator16(context_t* c) {
         const int x = c->iterators.xl;
         const int y = c->iterators.y;
         texture_t& tx = c->state.texture[0];
@@ -995,7 +997,7 @@ protected:
  * texture pixel value.
  */
 struct clamp_iterator {
-    clamp_iterator(context_t* c) {
+    explicit clamp_iterator(context_t* c) {
         const int xs = c->iterators.xl;
         texture_t& tx = c->state.texture[0];
         texture_iterators_t& ti = tx.iterators;
@@ -1105,13 +1107,13 @@ void horz_clamp_iterator::init(const context_t* c, int shift)
 }
 
 struct horz_clamp_iterator16 : horz_clamp_iterator {
-    horz_clamp_iterator16(const context_t* c) {
+    explicit horz_clamp_iterator16(const context_t* c) {
         init(c,1);
     };
 };
 
 struct horz_clamp_iterator32 : horz_clamp_iterator {
-    horz_clamp_iterator32(context_t* c) {
+    explicit horz_clamp_iterator32(context_t* c) {
         init(c,2);
     };
 };
@@ -1119,7 +1121,7 @@ struct horz_clamp_iterator32 : horz_clamp_iterator {
 /* This is used to perform dithering operations.
  */
 struct ditherer {
-    ditherer(const context_t* c) {
+    explicit ditherer(const context_t* c) {
         const int x = c->iterators.xl;
         const int y = c->iterators.y;
         m_line = &c->ditherMatrix[ ((y & GGL_DITHER_MASK)<<GGL_DITHER_ORDER_SHIFT) ];
@@ -1165,7 +1167,7 @@ protected:
  *   blender.blend(<32-bit-src-pixel-value>,<ptr-to-16-bit-dest-pixel>)
  */
 struct blender_32to16 {
-    blender_32to16(context_t* /*c*/) { }
+    explicit blender_32to16(context_t* /*c*/) { }
     void write(uint32_t s, uint16_t* dst) {
         if (s == 0)
             return;
@@ -1222,7 +1224,7 @@ struct blender_32to16 {
  * where dstFactor=srcA*(1-srcA) srcFactor=srcA
  */
 struct blender_32to16_srcA {
-    blender_32to16_srcA(const context_t* /*c*/) { }
+    explicit blender_32to16_srcA(const context_t* /*c*/) { }
     void write(uint32_t s, uint16_t* dst) {
         if (!s) {
             return;
@@ -1264,7 +1266,7 @@ protected:
 /* This blender does a normal blend after modulation.
  */
 struct blender_32to16_modulate : blender_modulate {
-    blender_32to16_modulate(const context_t* c) {
+    explicit blender_32to16_modulate(const context_t* c) {
         init(c);
     }
     void write(uint32_t s, uint16_t* dst) {
@@ -1336,7 +1338,7 @@ struct blender_32to16_modulate : blender_modulate {
 
 /* same as 32to16_modulate, except that the input is xRGB, instead of ARGB */
 struct blender_x32to16_modulate : blender_modulate {
-    blender_x32to16_modulate(const context_t* c) {
+    explicit blender_x32to16_modulate(const context_t* c) {
         init(c);
     }
     void write(uint32_t s, uint16_t* dst) {
@@ -1391,7 +1393,7 @@ struct blender_x32to16_modulate : blender_modulate {
 
 /* Same as above, but source is 16bit rgb565 */
 struct blender_16to16_modulate : blender_modulate {
-    blender_16to16_modulate(const context_t* c) {
+    explicit blender_16to16_modulate(const context_t* c) {
         init(c);
     }
     void write(uint16_t s16, uint16_t* dst) {
@@ -1427,7 +1429,7 @@ struct blender_16to16_modulate : blender_modulate {
  *   }
  */
 struct dst_iterator16 {
-    dst_iterator16(const context_t* c) {
+    explicit dst_iterator16(const context_t* c) {
         const int x = c->iterators.xl;
         const int width = c->iterators.xr - x;
         const int32_t y = c->iterators.y;
@@ -2103,6 +2105,8 @@ void scanline_col32cb16blend(context_t* c)
 #endif // defined(__ARM_HAVE_NEON) && BYTE_ORDER == LITTLE_ENDIAN
 #elif ((ANDROID_CODEGEN >= ANDROID_CODEGEN_ASM) && defined(__aarch64__))
     scanline_col32cb16blend_arm64(dst, GGL_RGBA_TO_HOST(c->packed8888), ct);
+#elif ((ANDROID_CODEGEN >= ANDROID_CODEGEN_ASM) && (defined(__mips__) && defined(__LP64__)))
+    scanline_col32cb16blend_mips64(dst, GGL_RGBA_TO_HOST(c->packed8888), ct);
 #else
     uint32_t s = GGL_RGBA_TO_HOST(c->packed8888);
     int sA = (s>>24);
@@ -2175,7 +2179,8 @@ last_one:
 
 void scanline_t32cb16blend(context_t* c)
 {
-#if ((ANDROID_CODEGEN >= ANDROID_CODEGEN_ASM) && (defined(__arm__) || (defined(__mips__) && !defined(__LP64__) && __mips_isa_rev < 6) || defined(__aarch64__)))
+#if ((ANDROID_CODEGEN >= ANDROID_CODEGEN_ASM) && (defined(__arm__) || defined(__aarch64__) || \
+    (defined(__mips__) && ((!defined(__LP64__) && __mips_isa_rev < 6) || defined(__LP64__)))))
     int32_t x = c->iterators.xl;
     size_t ct = c->iterators.xr - x;
     int32_t y = c->iterators.y;
@@ -2191,8 +2196,10 @@ void scanline_t32cb16blend(context_t* c)
     scanline_t32cb16blend_arm(dst, src, ct);
 #elif defined(__aarch64__)
     scanline_t32cb16blend_arm64(dst, src, ct);
-#elif defined(__mips__)
+#elif defined(__mips__) && !defined(__LP64__) && __mips_isa_rev < 6
     scanline_t32cb16blend_mips(dst, src, ct);
+#elif defined(__mips__) && defined(__LP64__)
+    scanline_t32cb16blend_mips64(dst, src, ct);
 #endif
 #else
     dst_iterator16  di(c);

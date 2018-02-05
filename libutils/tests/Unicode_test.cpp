@@ -29,6 +29,8 @@ protected:
 
     virtual void TearDown() {
     }
+
+    char16_t const * const kSearchString = u"I am a leaf on the wind.";
 };
 
 TEST_F(UnicodeTest, UTF8toUTF16ZeroLength) {
@@ -96,7 +98,7 @@ TEST_F(UnicodeTest, UTF8toUTF16Normal) {
 
     char16_t output[1 + 1 + 1 + 2 + 1]; // Room for NULL
 
-    utf8_to_utf16(str, sizeof(str), output);
+    utf8_to_utf16(str, sizeof(str), output, sizeof(output) / sizeof(output[0]));
 
     EXPECT_EQ(0x0030, output[0])
             << "should be U+0030";
@@ -110,6 +112,50 @@ TEST_F(UnicodeTest, UTF8toUTF16Normal) {
             << "should be second half of surrogate U+10000";
     EXPECT_EQ(NULL, output[5])
             << "should be NULL terminated";
+}
+
+TEST_F(UnicodeTest, strstr16EmptyTarget) {
+    EXPECT_EQ(strstr16(kSearchString, u""), kSearchString)
+            << "should return the original pointer";
+}
+
+TEST_F(UnicodeTest, strstr16SameString) {
+    const char16_t* result = strstr16(kSearchString, kSearchString);
+    EXPECT_EQ(kSearchString, result)
+            << "should return the original pointer";
+}
+
+TEST_F(UnicodeTest, strstr16TargetStartOfString) {
+    const char16_t* result = strstr16(kSearchString, u"I am");
+    EXPECT_EQ(kSearchString, result)
+            << "should return the original pointer";
+}
+
+
+TEST_F(UnicodeTest, strstr16TargetEndOfString) {
+    const char16_t* result = strstr16(kSearchString, u"wind.");
+    EXPECT_EQ(kSearchString+19, result);
+}
+
+TEST_F(UnicodeTest, strstr16TargetWithinString) {
+    const char16_t* result = strstr16(kSearchString, u"leaf");
+    EXPECT_EQ(kSearchString+7, result);
+}
+
+TEST_F(UnicodeTest, strstr16TargetNotPresent) {
+    const char16_t* result = strstr16(kSearchString, u"soar");
+    EXPECT_EQ(nullptr, result);
+}
+
+// http://b/29267949
+// Test that overreading in utf8_to_utf16_length is detected
+TEST_F(UnicodeTest, InvalidUtf8OverreadDetected) {
+    // An utf8 char starting with \xc4 is two bytes long.
+    // Add extra zeros so no extra memory is read in case the code doesn't
+    // work as expected.
+    static char utf8[] = "\xc4\x00\x00\x00";
+    ASSERT_DEATH(utf8_to_utf16_length((uint8_t *) utf8, strlen(utf8),
+            true /* overreadIsFatal */), "" /* regex for ASSERT_DEATH */);
 }
 
 }

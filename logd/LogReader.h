@@ -18,26 +18,29 @@
 #define _LOGD_LOG_WRITER_H__
 
 #include <sysutils/SocketListener.h>
-#include "LogBuffer.h"
-#include "LogTimes.h"
+
+#define LOGD_SNDTIMEO 32
+
+class LogBuffer;
 
 class LogReader : public SocketListener {
-    LogBuffer &mLogbuf;
+    LogBuffer& mLogbuf;
 
-public:
-    LogReader(LogBuffer *logbuf);
+   public:
+    explicit LogReader(LogBuffer* logbuf);
     void notifyNewLog();
 
-    LogBuffer &logbuf(void) const { return mLogbuf; }
+    LogBuffer& logbuf(void) const {
+        return mLogbuf;
+    }
 
-protected:
-    virtual bool onDataAvailable(SocketClient *cli);
+   protected:
+    virtual bool onDataAvailable(SocketClient* cli);
 
-private:
+   private:
     static int getLogSocket();
 
-    void doSocketDelete(SocketClient *cli);
-
+    void doSocketDelete(SocketClient* cli);
 };
 
 #endif

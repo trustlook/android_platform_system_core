@@ -22,44 +22,76 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <log/logger.h>
 #include <private/android_logger.h>
 
+#include "LogBuffer.h"
 #include "LogBufferElement.h"
 #include "LogCommand.h"
 #include "LogReader.h"
+#include "LogUtils.h"
 
-const uint64_t LogBufferElement::FLUSH_ERROR(0);
+const log_time LogBufferElement::FLUSH_ERROR((uint32_t)-1, (uint32_t)-1);
 atomic_int_fast64_t LogBufferElement::sequence(1);
 
 LogBufferElement::LogBufferElement(log_id_t log_id, log_time realtime,
                                    uid_t uid, pid_t pid, pid_t tid,
-                                   const char *msg, unsigned short len) :
-        mLogId(log_id),
-        mUid(uid),
-        mPid(pid),
-        mTid(tid),
-        mMsgLen(len),
-        mSequence(sequence.fetch_add(1, memory_order_relaxed)),
-        mRealTime(realtime) {
+                                   const char* msg, unsigned short len)
+    : mUid(uid),
+      mPid(pid),
+      mTid(tid),
+      mRealTime(realtime),
+      mMsgLen(len),
+      mLogId(log_id),
+      mDropped(false) {
     mMsg = new char[len];
     memcpy(mMsg, msg, len);
 }
 
+LogBufferElement::LogBufferElement(const LogBufferElement& elem)
+    : mUid(elem.mUid),
+      mPid(elem.mPid),
+      mTid(elem.mTid),
+      mRealTime(elem.mRealTime),
+      mMsgLen(elem.mMsgLen),
+      mLogId(elem.mLogId),
+      mDropped(elem.mDropped) {
+    mMsg = new char[mMsgLen];
+    memcpy(mMsg, elem.mMsg, mMsgLen);
+}
+
 LogBufferElement::~LogBufferElement() {
-    delete [] mMsg;
+    delete[] mMsg;
 }
 
 uint32_t LogBufferElement::getTag() const {
-    if ((mLogId != LOG_ID_EVENTS) || !mMsg || (mMsgLen < sizeof(uint32_t))) {
-        return 0;
+    return (isBinary() &&
+            ((mDropped && mMsg != nullptr) ||
+             (!mDropped && mMsgLen >= sizeof(android_event_header_t))))
+               ? reinterpret_cast<const android_event_header_t*>(mMsg)->tag
+               : 0;
+}
+
+unsigned short LogBufferElement::setDropped(unsigned short value) {
+    // The tag information is saved in mMsg data, if the tag is non-zero
+    // save only the information needed to get the tag.
+    if (getTag() != 0) {
+        if (mMsgLen > sizeof(android_event_header_t)) {
+            char* truncated_msg = new char[sizeof(android_event_header_t)];
+            memcpy(truncated_msg, mMsg, sizeof(android_event_header_t));
+            delete[] mMsg;
+            mMsg = truncated_msg;
+        }  // mMsgLen == sizeof(android_event_header_t), already at minimum.
+    } else {
+        delete[] mMsg;
+        mMsg = nullptr;
     }
-    return le32toh(reinterpret_cast<android_event_header_t *>(mMsg)->tag);
+    mDropped = true;
+    return mDroppedCount = value;
 }
 
 // caller must own and free character string
-char *android::tidToName(pid_t tid) {
-    char *retval = NULL;
+char* android::tidToName(pid_t tid) {
+    char* retval = NULL;
     char buffer[256];
     snprintf(buffer, sizeof(buffer), "/proc/%u/comm", tid);
     int fd = open(buffer, O_RDONLY);
@@ -79,7 +111,7 @@ char *android::tidToName(pid_t tid) {
     }
 
     // if nothing for comm, check out cmdline
-    char *name = android::pidToName(tid);
+    char* name = android::pidToName(tid);
     if (!retval) {
         retval = name;
         name = NULL;
@@ -91,7 +123,8 @@ char *android::tidToName(pid_t tid) {
         size_t retval_len = strlen(retval);
         size_t name_len = strlen(name);
         // KISS: ToDo: Only checks prefix truncated, not suffix, or both
-        if ((retval_len < name_len) && !strcmp(retval, name + name_len - retval_len)) {
+        if ((retval_len < name_len) &&
+            !fastcmp<strcmp>(retval, name + name_len - retval_len)) {
             free(retval);
             retval = name;
         } else {
@@ -102,79 +135,84 @@ char *android::tidToName(pid_t tid) {
 }
 
 // assumption: mMsg == NULL
-size_t LogBufferElement::populateDroppedMessage(char *&buffer,
-        LogBuffer *parent) {
+size_t LogBufferElement::populateDroppedMessage(char*& buffer, LogBuffer* parent,
+                                                bool lastSame) {
     static const char tag[] = "chatty";
 
-    if (!__android_log_is_loggable(ANDROID_LOG_INFO, tag, ANDROID_LOG_VERBOSE)) {
+    if (!__android_log_is_loggable_len(ANDROID_LOG_INFO, tag, strlen(tag),
+                                       ANDROID_LOG_VERBOSE)) {
         return 0;
     }
 
-    static const char format_uid[] = "uid=%u%s%s expire %u line%s";
-    parent->lock();
-    char *name = parent->uidToName(mUid);
+    static const char format_uid[] = "uid=%u%s%s %s %u line%s";
+    parent->wrlock();
+    const char* name = parent->uidToName(mUid);
     parent->unlock();
-    char *commName = android::tidToName(mTid);
+    const char* commName = android::tidToName(mTid);
     if (!commName && (mTid != mPid)) {
         commName = android::tidToName(mPid);
     }
     if (!commName) {
-        parent->lock();
+        parent->wrlock();
         commName = parent->pidToName(mPid);
         parent->unlock();
     }
-    size_t len = name ? strlen(name) : 0;
-    if (len && commName && !strncmp(name, commName, len)) {
-        if (commName[len] == '\0') {
-            free(commName);
-            commName = NULL;
-        } else {
-            free(name);
-            name = NULL;
+    if (name && name[0] && commName && (name[0] == commName[0])) {
+        size_t len = strlen(name + 1);
+        if (!strncmp(name + 1, commName + 1, len)) {
+            if (commName[len + 1] == '\0') {
+                free(const_cast<char*>(commName));
+                commName = NULL;
+            } else {
+                free(const_cast<char*>(name));
+                name = NULL;
+            }
         }
     }
     if (name) {
-        char *p = NULL;
-        asprintf(&p, "(%s)", name);
-        if (p) {
-            free(name);
-            name = p;
+        char* buf = NULL;
+        asprintf(&buf, "(%s)", name);
+        if (buf) {
+            free(const_cast<char*>(name));
+            name = buf;
         }
     }
     if (commName) {
-        char *p = NULL;
-        asprintf(&p, " %s", commName);
-        if (p) {
-            free(commName);
-            commName = p;
+        char* buf = NULL;
+        asprintf(&buf, " %s", commName);
+        if (buf) {
+            free(const_cast<char*>(commName));
+            commName = buf;
         }
     }
     // identical to below to calculate the buffer size required
-    len = snprintf(NULL, 0, format_uid, mUid, name ? name : "",
-                   commName ? commName : "",
-                   mDropped, (mDropped > 1) ? "s" : "");
+    const char* type = lastSame ? "identical" : "expire";
+    size_t len = snprintf(NULL, 0, format_uid, mUid, name ? name : "",
+                          commName ? commName : "", type, getDropped(),
+                          (getDropped() > 1) ? "s" : "");
 
     size_t hdrLen;
-    if (mLogId == LOG_ID_EVENTS) {
+    if (isBinary()) {
         hdrLen = sizeof(android_log_event_string_t);
     } else {
         hdrLen = 1 + sizeof(tag);
     }
 
-    buffer = static_cast<char *>(calloc(1, hdrLen + len + 1));
+    buffer = static_cast<char*>(calloc(1, hdrLen + len + 1));
     if (!buffer) {
-        free(name);
-        free(commName);
+        free(const_cast<char*>(name));
+        free(const_cast<char*>(commName));
         return 0;
     }
 
     size_t retval = hdrLen + len;
-    if (mLogId == LOG_ID_EVENTS) {
-        android_log_event_string_t *e = reinterpret_cast<android_log_event_string_t *>(buffer);
+    if (isBinary()) {
+        android_log_event_string_t* event =
+            reinterpret_cast<android_log_event_string_t*>(buffer);
 
-        e->header.tag = htole32(LOGD_LOG_TAG);
-        e->type = EVENT_TYPE_STRING;
-        e->length = htole32(len);
+        event->header.tag = htole32(CHATTY_LOG_TAG);
+        event->type = EVENT_TYPE_STRING;
+        event->length = htole32(len);
     } else {
         ++retval;
         buffer[0] = ANDROID_LOG_INFO;
@@ -182,37 +220,38 @@ size_t LogBufferElement::populateDroppedMessage(char *&buffer,
     }
 
     snprintf(buffer + hdrLen, len + 1, format_uid, mUid, name ? name : "",
-             commName ? commName : "",
-             mDropped, (mDropped > 1) ? "s" : "");
-    free(name);
-    free(commName);
+             commName ? commName : "", type, getDropped(),
+             (getDropped() > 1) ? "s" : "");
+    free(const_cast<char*>(name));
+    free(const_cast<char*>(commName));
 
     return retval;
 }
 
-uint64_t LogBufferElement::flushTo(SocketClient *reader, LogBuffer *parent) {
-    struct logger_entry_v3 entry;
+log_time LogBufferElement::flushTo(SocketClient* reader, LogBuffer* parent,
+                                   bool privileged, bool lastSame) {
+    struct logger_entry_v4 entry;
 
-    memset(&entry, 0, sizeof(struct logger_entry_v3));
+    memset(&entry, 0, sizeof(struct logger_entry_v4));
 
-    entry.hdr_size = sizeof(struct logger_entry_v3);
+    entry.hdr_size = privileged ? sizeof(struct logger_entry_v4)
+                                : sizeof(struct logger_entry_v3);
     entry.lid = mLogId;
     entry.pid = mPid;
     entry.tid = mTid;
+    entry.uid = mUid;
     entry.sec = mRealTime.tv_sec;
     entry.nsec = mRealTime.tv_nsec;
 
     struct iovec iovec[2];
     iovec[0].iov_base = &entry;
-    iovec[0].iov_len = sizeof(struct logger_entry_v3);
+    iovec[0].iov_len = entry.hdr_size;
 
-    char *buffer = NULL;
+    char* buffer = NULL;
 
-    if (!mMsg) {
-        entry.len = populateDroppedMessage(buffer, parent);
-        if (!entry.len) {
-            return mSequence;
-        }
+    if (mDropped) {
+        entry.len = populateDroppedMessage(buffer, parent, lastSame);
+        if (!entry.len) return mRealTime;
         iovec[1].iov_base = buffer;
     } else {
         entry.len = mMsgLen;
@@ -220,11 +259,11 @@ uint64_t LogBufferElement::flushTo(SocketClient *reader, LogBuffer *parent) {
     }
     iovec[1].iov_len = entry.len;
 
-    uint64_t retval = reader->sendDatav(iovec, 2) ? FLUSH_ERROR : mSequence;
+    log_time retval = reader->sendDatav(iovec, 1 + (entry.len != 0))
+                          ? FLUSH_ERROR
+                          : mRealTime;
 
-    if (buffer) {
-        free(buffer);
-    }
+    if (buffer) free(buffer);
 
     return retval;
 }

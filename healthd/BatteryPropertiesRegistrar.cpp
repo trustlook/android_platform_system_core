@@ -26,18 +26,29 @@
 #include <utils/Mutex.h>
 #include <utils/String16.h>
 
-#include "healthd.h"
+#include <healthd/healthd.h>
 
 namespace android {
 
-void BatteryPropertiesRegistrar::publish() {
-    defaultServiceManager()->addService(String16("batteryproperties"), this);
+void BatteryPropertiesRegistrar::publish(
+    const sp<BatteryPropertiesRegistrar>& service) {
+    defaultServiceManager()->addService(String16("batteryproperties"), service);
 }
 
-void BatteryPropertiesRegistrar::notifyListeners(struct BatteryProperties props) {
-    Mutex::Autolock _l(mRegistrationLock);
-    for (size_t i = 0; i < mListeners.size(); i++) {
-        mListeners[i]->batteryPropertiesChanged(props);
+void BatteryPropertiesRegistrar::notifyListeners(const struct BatteryProperties& props) {
+    Vector<sp<IBatteryPropertiesListener> > listenersCopy;
+
+    // Binder currently may service an incoming oneway transaction whenever an
+    // outbound oneway call is made (if there is already a pending incoming
+    // oneway call waiting).  This is considered a bug and may change in the
+    // future.  For now, avoid recursive mutex lock while making outbound
+    // calls by making a local copy of the current list of listeners.
+    {
+        Mutex::Autolock _l(mRegistrationLock);
+        listenersCopy = mListeners;
+    }
+    for (size_t i = 0; i < listenersCopy.size(); i++) {
+        listenersCopy[i]->batteryPropertiesChanged(props);
     }
 }
 
@@ -74,6 +85,10 @@ void BatteryPropertiesRegistrar::unregisterListener(const sp<IBatteryPropertiesL
 
 status_t BatteryPropertiesRegistrar::getProperty(int id, struct BatteryProperty *val) {
     return healthd_get_property(id, val);
+}
+
+void BatteryPropertiesRegistrar::scheduleUpdate() {
+    healthd_battery_update();
 }
 
 status_t BatteryPropertiesRegistrar::dump(int fd, const Vector<String16>& /*args*/) {
