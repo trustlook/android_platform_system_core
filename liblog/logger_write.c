@@ -34,7 +34,7 @@
 #include "log_portability.h"
 #include "logger.h"
 
-#define LOG_BUF_SIZE 1024
+#define LOG_BUF_SIZE 4096
 
 static int __write_to_log_init(log_id_t, struct iovec* vec, size_t nr);
 static int (*write_to_log)(log_id_t, struct iovec* vec,
